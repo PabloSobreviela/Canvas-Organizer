@@ -1,0 +1,78 @@
+# Vertex AI SDK
+google-cloud-aiplatform>=1.40.0
+
+# Flask backend
+Flask>=3.0.0
+flask-cors>=4.0.0
+flask-limiter>=3.5.0
+Werkzeug>=3.0.0
+
+# HTTP requests
+requests>=2.31.0
+urllib3>=2.0.0
+certifi>=2024.0.0
+charset-normalizer>=3.0.0
+
+# Canvas API
+canvasapi>=3.0.0
+
+# Environment management
+python-dotenv>=1.0.0
+
+# Document parsing
+pdfminer.six>=20221105
+pdfplumber>=0.11.0
+python-docx>=1.0.0
+openpyxl>=3.1.0
+lxml>=5.0.0
+beautifulsoup4>=4.12.0
+
+# Date/Time handling
+pytz>=2024.1
+python-dateutil>=2.8.0
+tzdata>=2024.1
+
+# Utilities
+blinker>=1.7.0
+click>=8.1.0
+colorama>=0.4.6
+itsdangerous>=2.1.0
+Jinja2>=3.1.0
+MarkupSafe>=2.1.0
+six>=1.16.0
+
+# Calendar/Feed parsing
+ics>=0.7.2
+feedparser>=6.0.0
+arrow>=1.3.0
+attrs>=23.0.0
+tatsu>=5.0.0
+
+# Cryptography (for secure connections)
+cffi>=1.15.0
+pycparser>=2.21
+cryptography>=42.0.0
+
+# ============================================
+# FIREBASE / GOOGLE CLOUD (NEW FOR CLOUD MIGRATION)
+# ============================================
+
+# Firebase Admin SDK (authentication + Firestore)
+firebase-admin>=6.0.0
+
+# Google Cloud Firestore (database)
+google-cloud-firestore>=2.14.0
+
+# Google Cloud Storage (file storage)
+google-cloud-storage>=2.10.0
+
+# Google Cloud BigQuery (billing export analytics)
+google-cloud-bigquery>=3.25.0
+
+# OpenTelemetry (structured AI token/cost logs)
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp-proto-http>=1.27.0
+
+# Production WSGI server
+gunicorn>=21.2.0

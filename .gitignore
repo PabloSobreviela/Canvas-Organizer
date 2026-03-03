@@ -1,0 +1,24 @@
+# Backend credentials and secrets
+backend/firebase_key.json
+backend/firebase-key.json
+backend/.env
+backend/.env.*
+!backend/.env.template
+backend/Amazon secret access key.txt
+backend/*secret*key*
+backend/*.pem
+backend/*-key.json
+
+# Frontend env files (never commit real config)
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production
+frontend/.env.production.local
+!frontend/.env.template
+
+.gcloud-tmp/
+
+# Local user data and cached course materials (PDFs, extracted text)
+backend/data/

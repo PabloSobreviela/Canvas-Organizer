@@ -1,0 +1,2834 @@
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { ChevronLeft, ChevronRight, Calendar, List, CheckCircle2, Circle, User, X, Menu, Home, Filter, Palette, Star } from "lucide-react";
+import { signInWithGoogle, logout, onAuthChange, getAuthToken, completeRedirectSignIn } from './firebase';
+
+// API Base URL - cloud-first fallback prevents accidental localhost calls in production builds
+const API_BASE = process.env.REACT_APP_API_URL || 'https://canvas-organizer-backend-93870731079.us-central1.run.app';
+
+const COURSE_TIMEZONE = "America/New_York";
+
+/**
+ * Parse due values safely.
+ * - null for missing/"No Date"
+ * - YYYY-MM-DD is treated as a local calendar day (prevents UTC shift)
+ * - full ISO strings are parsed normally
+ */
+
+
+function tzOffsetMinutes(date, timeZone) {
+  // Returns the offset (in minutes) between UTC and the given timeZone at `date`
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+
+  const parts = dtf.formatToParts(date);
+  const map = {};
+  for (const p of parts) {
+    if (p.type !== "literal") map[p.type] = p.value;
+  }
+
+  // Interpret the formatted (timeZone) clock reading as UTC millis
+  const asUTC = Date.UTC(
+    Number(map.year),
+    Number(map.month) - 1,
+    Number(map.day),
+    Number(map.hour),
+    Number(map.minute),
+    Number(map.second)
+  );
+
+  return (asUTC - date.getTime()) / 60000;
+}
+
+function dateFromYMDInTimeZone(y, mo, d, timeZone) {
+  // Returns a Date object representing midnight (00:00) in `timeZone` for y/mo/d
+  const utcGuess = new Date(Date.UTC(y, mo, d, 0, 0, 0));
+  const offset = tzOffsetMinutes(utcGuess, timeZone);
+  return new Date(utcGuess.getTime() - offset * 60000);
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function formatDateOnly(dueStr) {
+  const dt = parseDueToDate(dueStr);
+  if (!dt) return "--";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: COURSE_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(dt);
+}
+
+
+
+function parseDueToDate(due) {
+  if (!due) return null;
+  if (typeof due === "string" && due.trim().toLowerCase() === "no date") return null;
+
+  // Date-only: YYYY-MM-DD  (JS treats this as UTC if you do new Date(str) => BAD)
+  const m = typeof due === "string" && due.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]) - 1;
+    const d = Number(m[3]);
+
+    // Make a LOCAL date (your machine timezone). For GT courses you're in the same TZ anyway.
+    // This avoids the off-by-one behavior.
+    return dateFromYMDInTimeZone(y, mo, d, COURSE_TIMEZONE);
+  }
+
+  const dt = new Date(due);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt;
+}
+
+function formatDueInCourseTZ(dueStr) {
+  const dt = parseDueToDate(dueStr);
+  if (!dt) return "--";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: COURSE_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(dt);
+}
+
+function formatShortDueInCourseTZ(dueStr) {
+  const dt = parseDueToDate(dueStr);
+  if (!dt) return "--";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: COURSE_TIMEZONE,
+    day: "numeric",
+    month: "short",
+  }).format(dt);
+}
+
+
+function getStatusBadge(status) {
+  if (status === "CONFLICT") {
+    return (
+      <span className="ml-2 px-2 py-0.5 text-xs rounded bg-red-950 text-red-300 border border-red-900">
+        Conflict
+      </span>
+    );
+  }
+  if (status === "RESOLVED") {
+    return (
+      <span className="ml-2 px-2 py-0.5 text-xs rounded bg-green-950 text-green-300 border border-green-900">
+        Resolved
+      </span>
+    );
+  }
+  return null;
+}
+
+// INVERTED COLOR SCHEME (Light text, Dark BG) for badges
+// Categories: ASSIGNMENT and EXAM only (QUIZ merged into EXAM)
+function getCategoryBadge(category, className = "") {
+  const c = (category || "ASSIGNMENT").toUpperCase();
+  const base = `px-2 py-0.5 text-xs rounded border inline-flex items-center ${className}`;
+
+  // EXAM covers both exams and quizzes
+  if (c === "EXAM" || c === "QUIZ") return <span className={`${base} bg-red-950/60 text-red-200 border-red-900`}>Exam</span>;
+  if (c === "PLACEHOLDER") return <span className={`${base} bg-slate-800 text-slate-300 border-slate-700`}>Placeholder</span>;
+  // Default to Assignment
+  return <span className={`${base} bg-blue-950/60 text-blue-200 border-blue-900`}>Assignment</span>;
+}
+
+function getWeekDates(date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = d.getDate() - day;
+  const sunday = new Date(d.setDate(diff));
+  const week = [];
+  for (let i = 0; i < 7; i++) {
+    const current = new Date(sunday);
+    current.setDate(sunday.getDate() + i);
+    week.push(current);
+  }
+  return week;
+}
+
+/**
+ * Returns calendar dates for the given month with 4, 5, or 6 rows
+ * depending on how many weeks the month actually needs.
+ */
+function getMonthDates(date) {
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = d.getMonth();
+
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const startDay = firstDay.getDay();
+  const daysInMonth = lastDay.getDate();
+
+  const totalCellsNeeded = startDay + daysInMonth;
+  const rows = Math.ceil(totalCellsNeeded / 7); // 4, 5, or 6
+  const totalSlots = rows * 7;
+
+  const dates = [];
+
+  for (let i = 0; i < startDay; i++) {
+    const prevDate = new Date(year, month, -startDay + i + 1);
+    dates.push({ date: prevDate, isCurrentMonth: false });
+  }
+
+  for (let i = 1; i <= daysInMonth; i++) {
+    dates.push({ date: new Date(year, month, i), isCurrentMonth: true });
+  }
+
+  const remainingDays = totalSlots - dates.length;
+  for (let i = 1; i <= remainingDays; i++) {
+    dates.push({ date: new Date(year, month + 1, i), isCurrentMonth: false });
+  }
+
+  return { dates, rows };
+}
+
+function isSameDay(d1, d2) {
+  return d1.getFullYear() === d2.getFullYear() &&
+    d1.getMonth() === d2.getMonth() &&
+    d1.getDate() === d2.getDate();
+}
+
+function normalizeCourseId(id) {
+  return id == null ? "" : String(id);
+}
+
+function deriveCourseCode(rawCode, courseName = "") {
+  const raw = String(rawCode || "").trim();
+  const name = String(courseName || "").trim();
+  const regex = /\b([A-Za-z]{2,6})\s*[- ]?\s*(\d{3,4})\b/;
+
+  const rawMatch = raw.match(regex);
+  if (rawMatch) return `${rawMatch[1].toUpperCase()} ${rawMatch[2]}`;
+
+  const nameMatch = name.match(regex);
+  if (nameMatch) return `${nameMatch[1].toUpperCase()} ${nameMatch[2]}`;
+
+  if (raw && raw.toUpperCase() !== "UNK") return raw.toUpperCase();
+  return "UNK";
+}
+
+function getMonthGridRowsClass(rows) {
+  if (rows === 4) return "month-grid-rows-4";
+  if (rows === 5) return "month-grid-rows-5";
+  return "month-grid-rows-6";
+}
+
+const COURSE_COLOR_CLASS_MAP = {
+  "#ef4444": { dot: "bg-red-500", tag: "bg-red-500/20 text-red-300 border border-red-500/40", accent: "border-l-red-500" },
+  "#f97316": { dot: "bg-orange-500", tag: "bg-orange-500/20 text-orange-300 border border-orange-500/40", accent: "border-l-orange-500" },
+  "#f59e0b": { dot: "bg-amber-500", tag: "bg-amber-500/20 text-amber-300 border border-amber-500/40", accent: "border-l-amber-500" },
+  "#eab308": { dot: "bg-yellow-500", tag: "bg-yellow-500/20 text-yellow-300 border border-yellow-500/40", accent: "border-l-yellow-500" },
+  "#84cc16": { dot: "bg-lime-500", tag: "bg-lime-500/20 text-lime-300 border border-lime-500/40", accent: "border-l-lime-500" },
+  "#22c55e": { dot: "bg-green-500", tag: "bg-green-500/20 text-green-300 border border-green-500/40", accent: "border-l-green-500" },
+  "#10b981": { dot: "bg-emerald-500", tag: "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40", accent: "border-l-emerald-500" },
+  "#14b8a6": { dot: "bg-teal-500", tag: "bg-teal-500/20 text-teal-300 border border-teal-500/40", accent: "border-l-teal-500" },
+  "#06b6d4": { dot: "bg-cyan-500", tag: "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40", accent: "border-l-cyan-500" },
+  "#0ea5e9": { dot: "bg-sky-500", tag: "bg-sky-500/20 text-sky-300 border border-sky-500/40", accent: "border-l-sky-500" },
+  "#3b82f6": { dot: "bg-blue-500", tag: "bg-blue-500/20 text-blue-300 border border-blue-500/40", accent: "border-l-blue-500" },
+  "#6366f1": { dot: "bg-indigo-500", tag: "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40", accent: "border-l-indigo-500" },
+  "#8b5cf6": { dot: "bg-violet-500", tag: "bg-violet-500/20 text-violet-300 border border-violet-500/40", accent: "border-l-violet-500" },
+  "#a855f7": { dot: "bg-purple-500", tag: "bg-purple-500/20 text-purple-300 border border-purple-500/40", accent: "border-l-purple-500" },
+  "#d946ef": { dot: "bg-fuchsia-500", tag: "bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/40", accent: "border-l-fuchsia-500" },
+  "#ec4899": { dot: "bg-pink-500", tag: "bg-pink-500/20 text-pink-300 border border-pink-500/40", accent: "border-l-pink-500" },
+  "#f43f5e": { dot: "bg-rose-500", tag: "bg-rose-500/20 text-rose-300 border border-rose-500/40", accent: "border-l-rose-500" },
+  "#78716c": { dot: "bg-stone-500", tag: "bg-stone-500/20 text-stone-300 border border-stone-500/40", accent: "border-l-stone-500" },
+};
+
+function normalizeHexColor(color) {
+  return String(color || "").trim().toLowerCase();
+}
+
+function getCourseColorClasses(color) {
+  return COURSE_COLOR_CLASS_MAP[normalizeHexColor(color)] || {
+    dot: "bg-zinc-500",
+    tag: "bg-zinc-500/20 text-zinc-300 border border-zinc-500/40",
+    accent: "border-l-zinc-500",
+  };
+}
+
+const COURSE_SYNC_STATE_KEY_PREFIX = "course_sync_state";
+const COURSE_SYNC_STATE_KEY_VERSION = "v2";
+const LEGACY_COURSE_SYNC_STATE_KEY = "course_sync_state";
+const COMPLETED_ITEMS_KEY_PREFIX = "completed_items_state";
+const COMPLETED_ITEMS_KEY_VERSION = "v2";
+
+function normalizeCanvasBaseUrl(url) {
+  return String(url || "").trim().toLowerCase().replace(/\/+$/, "");
+}
+
+function hashScopeToken(token = "") {
+  // Non-reversible token fingerprint for localStorage keys (avoids token material in key names).
+  const input = String(token || "").trim();
+  if (!input) return "";
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `h:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function buildCourseSyncStateKey(baseUrl = "", token = "") {
+  const normalizedBaseUrl = normalizeCanvasBaseUrl(baseUrl || localStorage.getItem("canvas_base_url"));
+  const tokenHash = hashScopeToken(token);
+  if (!normalizedBaseUrl || !tokenHash) return COURSE_SYNC_STATE_KEY_PREFIX;
+
+  const scope = encodeURIComponent(`${normalizedBaseUrl}|${tokenHash}`);
+  return `${COURSE_SYNC_STATE_KEY_PREFIX}:${COURSE_SYNC_STATE_KEY_VERSION}:${scope}`;
+}
+
+function getSavedCourseSyncState(baseUrl = "", token = "") {
+  const scopedKey = buildCourseSyncStateKey(baseUrl, token);
+  try {
+    const raw = localStorage.getItem(scopedKey);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function setSavedCourseSyncState(state, baseUrl = "", token = "") {
+  const scopedKey = buildCourseSyncStateKey(baseUrl, token);
+  localStorage.setItem(scopedKey, JSON.stringify(state));
+}
+
+function clearSavedCourseSyncState(baseUrl = "", token = "") {
+  const scopedKey = buildCourseSyncStateKey(baseUrl, token);
+  localStorage.removeItem(scopedKey);
+  localStorage.removeItem(LEGACY_COURSE_SYNC_STATE_KEY);
+}
+
+function buildCompletedItemsKey(userId = "", baseUrl = "", token = "") {
+  const normalizedUserId = String(userId || "").trim();
+  const normalizedBaseUrl = normalizeCanvasBaseUrl(baseUrl || localStorage.getItem("canvas_base_url"));
+  const tokenHash = hashScopeToken(token);
+  const scope = encodeURIComponent(`${normalizedUserId}|${normalizedBaseUrl}|${tokenHash}`);
+  return `${COMPLETED_ITEMS_KEY_PREFIX}:${COMPLETED_ITEMS_KEY_VERSION}:${scope}`;
+}
+
+function getSavedCompletedItems(userId = "", baseUrl = "", token = "") {
+  const key = buildCompletedItemsKey(userId, baseUrl, token);
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+
+    const normalized = {};
+    for (const [itemId, checked] of Object.entries(parsed)) {
+      if (checked) normalized[itemId] = true;
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function setSavedCompletedItems(state, userId = "", baseUrl = "", token = "") {
+  const key = buildCompletedItemsKey(userId, baseUrl, token);
+  localStorage.setItem(key, JSON.stringify(state || {}));
+}
+
+function App() {
+  // Firebase Authentication State
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // Canvas credentials (must be declared before loadCachedData uses them)
+  const [canvasBaseUrl, setCanvasBaseUrl] = useState(
+    localStorage.getItem("canvas_base_url") || ""
+  );
+  const [canvasToken, setCanvasToken] = useState("");
+  const [canvasStatus, setCanvasStatus] = useState(null);
+
+  // Security migration: purge legacy persisted Canvas token from previous versions.
+  useEffect(() => {
+    localStorage.removeItem("canvas_token");
+  }, []);
+
+  // Security migration: remove pre-v2 scoped state keys that embedded raw token material.
+  useEffect(() => {
+    const removals = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+
+      if (
+        key.startsWith(`${COURSE_SYNC_STATE_KEY_PREFIX}:`) &&
+        !key.startsWith(`${COURSE_SYNC_STATE_KEY_PREFIX}:${COURSE_SYNC_STATE_KEY_VERSION}:`)
+      ) {
+        removals.push(key);
+        continue;
+      }
+
+      if (
+        key.startsWith(`${COMPLETED_ITEMS_KEY_PREFIX}:`) &&
+        !key.startsWith(`${COMPLETED_ITEMS_KEY_PREFIX}:${COMPLETED_ITEMS_KEY_VERSION}:`)
+      ) {
+        removals.push(key);
+      }
+    }
+
+    removals.forEach((key) => localStorage.removeItem(key));
+  }, []);
+
+  // Course and assignment state (must be declared before loadCachedData)
+  const [activeCourses, setActiveCourses] = useState([]);
+  const [itemsByCourse, setItemsByCourse] = useState({});
+
+  // Load cached user data from Firestore on login
+  const loadCachedData = useCallback(async () => {
+    try {
+      const authToken = await getAuthToken();
+      if (!authToken) return;
+
+      const localBaseUrl = localStorage.getItem("canvas_base_url") || "";
+      const localToken = "";
+      let resolvedBaseUrl = localBaseUrl;
+      let resolvedToken = localToken;
+      let hasServerCredentials = false;
+
+      // First, load Canvas credentials from server
+      const credsRes = await fetch(`${API_BASE}/api/user/canvas-credentials`, {
+        headers: { "Authorization": `Bearer ${authToken}` }
+      }).catch(err => {
+        console.error(`Failed to fetch credentials from ${API_BASE}:`, err.message);
+        return null;
+      });
+
+      if (credsRes && credsRes.ok) {
+        const credsData = await credsRes.json();
+        if (credsData.has_credentials) {
+          hasServerCredentials = true;
+          resolvedBaseUrl = credsData.base_url || "";
+          resolvedToken = "";
+          console.log('Found saved Canvas credentials');
+          setCanvasBaseUrl(resolvedBaseUrl);
+          setCanvasToken(resolvedToken);
+          // Store only non-sensitive URL in localStorage
+          localStorage.setItem("canvas_base_url", resolvedBaseUrl);
+          setCanvasStatus("Connected");
+        }
+      } else if (credsRes) {
+        console.warn(`Credentials fetch failed with status ${credsRes.status}`);
+      }
+
+      // Then load cached courses and assignments
+      const res = await fetch(`${API_BASE}/api/user/data`, {
+        headers: { "Authorization": `Bearer ${authToken}` }
+      }).catch(err => {
+        console.error(`Failed to fetch user data from ${API_BASE}:`, err.message);
+        return null;
+      });
+
+      let data = { courses: [], assignments: [] };
+      if (!res || !res.ok) {
+        console.log('No cached data available');
+      } else {
+        data = await res.json();
+      }
+      console.log(`Loaded cached data: ${data.courses?.length || 0} courses, ${data.assignments?.length || 0} assignments`);
+      const cachedCourseCodeById = {};
+      const cachedCourseNameById = {};
+      const savedCourseSyncState = getSavedCourseSyncState(resolvedBaseUrl, resolvedToken);
+      const syncedCourseIds = new Set(
+        (data.assignments || []).map((a) => normalizeCourseId(a.courseId))
+      );
+
+      if (data.courses && data.courses.length > 0) {
+        // Set cached courses - map Firestore field names to frontend state
+        // Firestore uses: courseName, canvasCourseId, courseCode
+        // Frontend expects: name, id, courseCode
+        const mappedCourses = data.courses.map(c => {
+          const id = normalizeCourseId(c.canvasCourseId ?? c.canvasId ?? c.id);
+          const name = c.courseName || c.name || "Unknown";
+          const code = deriveCourseCode(c.courseCode, name);
+          const storedActive = typeof c.isCurrentlyActive === "boolean"
+            ? c.isCurrentlyActive
+            : typeof c?.metadata?.isCurrentlyActive === "boolean"
+              ? c.metadata.isCurrentlyActive
+              : null;
+          cachedCourseCodeById[id] = code;
+          cachedCourseNameById[id] = name;
+          return {
+            id,
+            name,
+            courseCode: code,
+            status: savedCourseSyncState[id] || (syncedCourseIds.has(id) ? "SYNCED" : "NOT_SYNCED"),
+            // Prefer server-stored active/inactive when available; otherwise default to active
+            // (matches Canvas UX better than "everything inactive" while waiting for refresh).
+            isCurrentlyActive: storedActive ?? true,
+          };
+        });
+        setActiveCourses(mappedCourses);
+      }
+
+      if (data.assignments && data.assignments.length > 0) {
+        // Group assignments by course
+        const byCourse = {};
+        for (const a of data.assignments) {
+          const cid = normalizeCourseId(a.courseId);
+          if (!byCourse[cid]) byCourse[cid] = [];
+          const resolvedCourseName = a.courseName || cachedCourseNameById[cid] || "Unknown";
+          const resolvedCourseCode = cachedCourseCodeById[cid] || deriveCourseCode(a.courseCode, resolvedCourseName);
+          byCourse[cid].push({
+            id: `${cid}-${a.canvasAssignmentId || a.name}`,
+            courseId: cid,
+            courseName: resolvedCourseName,
+            courseCode: resolvedCourseCode,
+            name: a.name,
+          due: a.normalizedDueAt ?? a.originalDueAt ?? a.dueAt ?? null,
+          status: a.status,
+          category: a.category || "ASSIGNMENT",
+        });
+      }
+      setItemsByCourse(byCourse);
+
+        const mergedSyncState = { ...savedCourseSyncState };
+        for (const cid of Object.keys(byCourse)) {
+          mergedSyncState[normalizeCourseId(cid)] = "SYNCED";
+        }
+        setSavedCourseSyncState(mergedSyncState, resolvedBaseUrl, resolvedToken);
+      }
+
+      // Auto-reconnect on reload and refresh course list.
+      // In cloud mode the Canvas token is stored server-side, so we may not have a local token.
+      if (resolvedBaseUrl && (resolvedToken || hasServerCredentials)) {
+        const refreshedCoursesRes = await fetch(`${API_BASE}/api/canvas/courses`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${authToken}`
+          },
+          body: JSON.stringify({ base_url: resolvedBaseUrl, token: resolvedToken }),
+        }).catch(() => null);
+
+        if (refreshedCoursesRes && refreshedCoursesRes.ok) {
+          const refreshedCourses = await refreshedCoursesRes.json();
+          if (Array.isArray(refreshedCourses)) {
+            setActiveCourses(
+              refreshedCourses
+                .filter((c) => c.workflow_state === "available")
+                .map((c) => {
+                  const cid = normalizeCourseId(c.id);
+                  const now = new Date();
+                  const backendActiveFlag = typeof c._app_is_currently_active === "boolean"
+                    ? c._app_is_currently_active
+                    : null;
+                  const isConcluded = c.concluded === true;
+                  const termEndAt = c.term?.end_at ? new Date(c.term.end_at) : null;
+                  const termStartAt = c.term?.start_at ? new Date(c.term.start_at) : null;
+                  const courseEndAt = c.end_at ? new Date(c.end_at) : null;
+                  const courseStartAt = c.start_at ? new Date(c.start_at) : null;
+                  const effectiveEndAt = termEndAt || courseEndAt;
+                  const effectiveStartAt = termStartAt || courseStartAt;
+
+                  let isCurrentlyActive;
+                  if (backendActiveFlag !== null) {
+                    isCurrentlyActive = backendActiveFlag;
+                  } else if (isConcluded) {
+                    isCurrentlyActive = false;
+                  } else if (effectiveEndAt && now > effectiveEndAt) {
+                    isCurrentlyActive = false;
+                  } else if (effectiveStartAt && effectiveEndAt) {
+                    isCurrentlyActive = now >= effectiveStartAt && now <= effectiveEndAt;
+                  } else if (effectiveStartAt && !effectiveEndAt) {
+                    isCurrentlyActive = now >= effectiveStartAt;
+                  } else {
+                    // If Canvas didn't provide enough data to determine activeness,
+                    // default to inactive to avoid "everything is active".
+                    isCurrentlyActive = false;
+                  }
+
+                  const stableCode = deriveCourseCode(
+                    cachedCourseCodeById[cid] || c.course_code,
+                    c.name
+                  );
+
+                  return {
+                    id: cid,
+                    name: c.name,
+                    courseCode: stableCode,
+                    status: savedCourseSyncState[cid] || (syncedCourseIds.has(cid) ? "SYNCED" : "NOT_SYNCED"),
+                    startAt: effectiveStartAt?.toISOString(),
+                    endAt: effectiveEndAt?.toISOString(),
+                    termName: c.term?.name || null,
+                    isCurrentlyActive,
+                  };
+                })
+            );
+          }
+        }
+
+        if (!hasServerCredentials && localBaseUrl && localToken) {
+          setCanvasStatus("Connected");
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load cached data:', err);
+    }
+  }, []);
+
+  // Listen to Firebase auth state changes
+  useEffect(() => {
+    // If we were forced into redirect-based auth (popup blocked), finalize it on load.
+    // This is safe to call even when there's no pending redirect result.
+    completeRedirectSignIn().catch((err) => {
+      console.error("Redirect sign-in completion failed:", err);
+    });
+
+    const unsubscribe = onAuthChange(async ({ user, token }) => {
+      setFirebaseUser(user);
+      setAuthLoading(false);
+
+      // Load cached data when user is authenticated
+      if (user) {
+        await loadCachedData();
+      }
+    });
+    return () => unsubscribe();
+  }, [loadCachedData]);
+
+  const handleGoogleSignIn = async () => {
+    try {
+      const res = await signInWithGoogle();
+      // Redirect-based sign-in will navigate away; nothing else to do here.
+      if (res && res.redirect) return;
+    } catch (err) {
+      console.error('Sign-in failed:', err);
+      const code = err?.code || 'unknown';
+      const message = err?.message || 'Unknown error';
+
+      if (code === 'auth/popup-closed-by-user') {
+        // User closed the popup, no need to alert
+        return;
+      } else if (code === 'auth/cancelled-popup-request') {
+        // Another popup was already open, no need to alert
+        return;
+      } else if (code === 'auth/unauthorized-domain') {
+        const origin = window?.location?.origin || '(unknown origin)';
+        alert(`Sign-in blocked: unauthorized domain (${origin}). Add it in Firebase Console > Authentication > Settings > Authorized domains.`);
+      } else if (code === 'auth/operation-not-allowed') {
+        alert('Google sign-in is not enabled. Enable Google as a sign-in provider in Firebase Console > Authentication > Sign-in method.');
+      } else if (code === 'auth/popup-blocked') {
+        alert('Sign-in popup was blocked by your browser. Please allow popups for this site and try again (or refresh after the redirect flow starts).');
+      } else if (code === 'auth/network-request-failed') {
+        alert('Network error. Please check your internet connection and try again.');
+      } else if (code === 'config/missing-firebase-env') {
+        alert(`Firebase config is missing in this build: ${message}`);
+      } else if (code === 'auth/invalid-api-key') {
+        alert('Firebase API key is invalid for this deployment (auth/invalid-api-key). Check REACT_APP_FIREBASE_API_KEY in the deployed build env.');
+      } else {
+        alert(`Sign-in failed (${code}): ${message}`);
+      }
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await logout();
+      // Clear Canvas credentials too
+      clearSavedCourseSyncState(canvasBaseUrl, canvasToken);
+      localStorage.removeItem('canvas_base_url');
+      setActiveCourses([]);
+      setItemsByCourse({});
+      setCanvasStatus(null);
+    } catch (err) {
+      console.error('Sign-out failed:', err);
+    }
+  };
+
+  // Other state (activeCourses, itemsByCourse, canvasStatus declared above)
+  const [selectedCourseId, setSelectedCourseId] = useState(null);
+  const [syncStatus, setSyncStatus] = useState({});
+  const [activeTab, setActiveTab] = useState("home"); // 'home', 'calendar', 'course', 'daily'
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncingCourseId, setSyncingCourseId] = useState(null);
+  const [syncQueue, setSyncQueue] = useState([]);
+  const isProcessingQueue = useRef(false);
+  const [showFilterDropdown, setShowFilterDropdown] = useState(false);
+  const [showProfilePopup, setShowProfilePopup] = useState(false);
+
+  // Calendar day modal
+  const [zoomedDate, setZoomedDate] = useState(null);
+
+  // Daily view date
+  const [currentDailyDate, setCurrentDailyDate] = useState(() => new Date());
+
+  // Sidebar state
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  // Completed items tracking
+  const [completedItems, setCompletedItems] = useState({});
+
+  // Weekly view filters (only deliverable categories: ASSIGNMENT and EXAM)
+  const [weeklyFilters, setWeeklyFilters] = useState(() => {
+    const saved = localStorage.getItem("weekly_filters");
+    const defaults = {
+      ASSIGNMENT: true,
+      EXAM: true,
+    };
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // Remove deprecated categories from old saved data
+      delete parsed.LECTURE;
+      delete parsed.READING;
+      delete parsed.QUIZ;
+      delete parsed.ATTENDANCE;
+      return { ...defaults, ...parsed };
+    }
+    return defaults;
+  });
+
+  useEffect(() => {
+    localStorage.setItem("weekly_filters", JSON.stringify(weeklyFilters));
+  }, [weeklyFilters]);
+
+  // Queue a course for syncing (stable reference for callbacks that depend on it).
+  const queueSyncCourse = useCallback((courseId) => {
+    const normalizedCourseId = normalizeCourseId(courseId);
+    setSyncQueue((prev) => {
+      // Don't add if already in queue or currently syncing
+      if (prev.includes(normalizedCourseId) || syncingCourseId === normalizedCourseId) {
+        return prev;
+      }
+      return [...prev, normalizedCourseId];
+    });
+    setSyncStatus((prev) => ({ ...prev, [normalizedCourseId]: "Queued..." }));
+  }, [syncingCourseId]);
+
+  // Persist checklist state by user + connected Canvas credentials so reloads keep checkbox status.
+  useEffect(() => {
+    if (!firebaseUser?.uid) {
+      setCompletedItems({});
+      return;
+    }
+
+    const connectedBaseUrl = canvasBaseUrl || "";
+    const connectedToken = canvasToken || "";
+    if (!connectedBaseUrl || !connectedToken) {
+      setCompletedItems({});
+      return;
+    }
+
+    setCompletedItems(
+      getSavedCompletedItems(firebaseUser.uid, connectedBaseUrl, connectedToken)
+    );
+  }, [firebaseUser?.uid, canvasBaseUrl, canvasToken]);
+
+  useEffect(() => {
+    if (!firebaseUser?.uid) return;
+
+    const connectedBaseUrl = canvasBaseUrl || "";
+    const connectedToken = canvasToken || "";
+    if (!connectedBaseUrl || !connectedToken) return;
+
+    setSavedCompletedItems(
+      completedItems,
+      firebaseUser.uid,
+      connectedBaseUrl,
+      connectedToken
+    );
+  }, [completedItems, firebaseUser?.uid, canvasBaseUrl, canvasToken]);
+
+  const toggleFilter = (category) => {
+    setWeeklyFilters(prev => ({ ...prev, [category]: !prev[category] }));
+  };
+
+  // Course colors for color coding - expanded palette with names
+  const COURSE_COLOR_PALETTE = [
+    { hex: '#ef4444', name: 'Red' },
+    { hex: '#f97316', name: 'Orange' },
+    { hex: '#f59e0b', name: 'Amber' },
+    { hex: '#eab308', name: 'Yellow' },
+    { hex: '#84cc16', name: 'Lime' },
+    { hex: '#22c55e', name: 'Green' },
+    { hex: '#10b981', name: 'Emerald' },
+    { hex: '#14b8a6', name: 'Teal' },
+    { hex: '#06b6d4', name: 'Cyan' },
+    { hex: '#0ea5e9', name: 'Sky' },
+    { hex: '#3b82f6', name: 'Blue' },
+    { hex: '#6366f1', name: 'Indigo' },
+    { hex: '#8b5cf6', name: 'Violet' },
+    { hex: '#a855f7', name: 'Purple' },
+    { hex: '#d946ef', name: 'Fuchsia' },
+    { hex: '#ec4899', name: 'Pink' },
+    { hex: '#f43f5e', name: 'Rose' },
+    { hex: '#78716c', name: 'Stone' },
+  ];
+
+  const [courseColors, setCourseColors] = useState(() => {
+    const saved = localStorage.getItem("course_colors");
+    return saved ? JSON.parse(saved) : {};
+  });
+
+  const [starredCourses, setStarredCourses] = useState(() => {
+    const saved = localStorage.getItem("starred_courses");
+    return saved ? JSON.parse(saved) : {};
+  });
+
+  const [showColorPicker, setShowColorPicker] = useState(null); // courseId or null
+  const [showColorDropdown, setShowColorDropdown] = useState(false); // for toolbar
+
+  useEffect(() => {
+    localStorage.setItem("course_colors", JSON.stringify(courseColors));
+  }, [courseColors]);
+
+  useEffect(() => {
+    localStorage.setItem("starred_courses", JSON.stringify(starredCourses));
+  }, [starredCourses]);
+
+  const persistUserPreferences = useCallback(async (updates) => {
+    try {
+      const authToken = await getAuthToken();
+      if (!authToken) return;
+
+      const res = await fetch(`${API_BASE}/api/user/preferences`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(updates || {}),
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.warn("Failed to persist preferences:", res.status, text);
+      }
+    } catch (e) {
+      console.warn("Failed to persist preferences:", e);
+    }
+  }, []);
+
+  const setCourseColor = (courseId, color) => {
+    const cid = normalizeCourseId(courseId);
+    setCourseColors((prev) => {
+      const next = { ...(prev || {}), [cid]: color };
+      persistUserPreferences({ courseColors: next });
+      return next;
+    });
+    setShowColorPicker(null);
+  };
+
+  const toggleCourseStar = useCallback((courseId) => {
+    const cid = normalizeCourseId(courseId);
+    setStarredCourses((prev) => {
+      const next = { ...(prev || {}) };
+      next[cid] = !next[cid];
+      if (!next[cid]) delete next[cid];
+      persistUserPreferences({ starredCourses: next });
+      return next;
+    });
+  }, [persistUserPreferences]);
+
+  const isCourseStarred = useCallback((courseId) => {
+    return !!starredCourses[normalizeCourseId(courseId)];
+  }, [starredCourses]);
+
+  const sortCourses = useCallback((a, b) => {
+    const aStar = isCourseStarred(a.id) ? 1 : 0;
+    const bStar = isCourseStarred(b.id) ? 1 : 0;
+    if (aStar !== bStar) return bStar - aStar;
+    const aName = String(a.courseCode || a.name || "");
+    const bName = String(b.courseCode || b.name || "");
+    return aName.localeCompare(bName);
+  }, [isCourseStarred]);
+
+  const activeCourseList = useMemo(() => {
+    return (activeCourses || [])
+      .filter((c) => c.isCurrentlyActive)
+      .slice()
+      .sort(sortCourses);
+  }, [activeCourses, sortCourses]);
+
+  const pastCourseList = useMemo(() => {
+    return (activeCourses || [])
+      .filter((c) => !c.isCurrentlyActive)
+      .slice()
+      .sort(sortCourses);
+  }, [activeCourses, sortCourses]);
+
+  const syncedCourseList = useMemo(() => {
+    return (activeCourses || [])
+      .filter((c) => c.status === "SYNCED")
+      .slice()
+      .sort(sortCourses);
+  }, [activeCourses, sortCourses]);
+
+  const starredActiveCourseList = useMemo(() => {
+    return activeCourseList.filter((c) => isCourseStarred(c.id));
+  }, [activeCourseList, isCourseStarred]);
+
+  const starredPastCourseList = useMemo(() => {
+    return pastCourseList.filter((c) => isCourseStarred(c.id));
+  }, [pastCourseList, isCourseStarred]);
+
+  const hasStarredCourses = starredActiveCourseList.length > 0 || starredPastCourseList.length > 0;
+
+  // Keep the original Active/Inactive model and layer Starred above it (no duplicates).
+  const activeUnstarredCourseList = useMemo(() => {
+    return activeCourseList.filter((c) => !isCourseStarred(c.id));
+  }, [activeCourseList, isCourseStarred]);
+
+  const pastUnstarredCourseList = useMemo(() => {
+    return pastCourseList.filter((c) => !isCourseStarred(c.id));
+  }, [pastCourseList, isCourseStarred]);
+
+  const renderCourseNavItem = useCallback((course, { muted } = { muted: false }) => {
+    const selected = normalizeCourseId(course.id) === normalizeCourseId(selectedCourseId) && activeTab === "course";
+    const baseText = muted ? "text-zinc-500" : "text-zinc-400";
+    const hoverText = muted ? "hover:bg-zinc-900 text-zinc-500" : "hover:bg-zinc-900 text-zinc-400";
+
+    return (
+      <div key={course.id} className="space-y-1">
+        <div
+          className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-sm font-medium transition-colors ${selected
+            ? "bg-blue-600 text-white"
+            : `bg-transparent ${hoverText}`
+            }`}
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleCourseStar(course.id); }}
+            className="shrink-0 -ml-1 mr-1 p-1 rounded hover:bg-zinc-800/60"
+            title={isCourseStarred(course.id) ? "Unstar course" : "Star course"}
+            aria-label={isCourseStarred(course.id) ? "Unstar course" : "Star course"}
+          >
+            <Star
+              size={16}
+              className={isCourseStarred(course.id) ? "text-yellow-300 fill-yellow-300" : (muted ? "text-zinc-700" : "text-zinc-600")}
+            />
+          </button>
+
+          <button
+            onClick={() => {
+              setSelectedCourseId(course.id);
+              setActiveTab("course");
+            }}
+            className={`flex-1 text-left truncate ${muted ? "opacity-70" : ""} ${selected ? "text-white" : baseText}`}
+          >
+            {course.name}
+          </button>
+
+          {course.status === "SYNCED" && (
+            <CheckCircle2 size={14} className={`ml-2 ${selected ? "text-white" : (muted ? "text-zinc-500" : "text-green-400")}`} />
+          )}
+        </div>
+
+        {course.status === "SYNCED" ? (
+          <button
+            onClick={() => queueSyncCourse(course.id)}
+            className="w-full px-3 py-1 text-xs bg-blue-900/40 text-blue-400 rounded border border-blue-900 hover:bg-blue-900/60 font-medium"
+          >
+            {syncingCourseId === normalizeCourseId(course.id) ? "Resyncing..." : syncQueue.includes(normalizeCourseId(course.id)) ? "Queued..." : "Resync"}
+          </button>
+        ) : (
+          <button
+            onClick={() => queueSyncCourse(course.id)}
+            className="w-full px-3 py-1 text-xs bg-green-900/40 text-green-400 rounded border border-green-900 hover:bg-green-900/60 font-medium"
+          >
+            {syncingCourseId === normalizeCourseId(course.id) ? "Syncing..." : syncQueue.includes(normalizeCourseId(course.id)) ? "Queued..." : "Sync Course"}
+          </button>
+        )}
+      </div>
+    );
+  }, [
+    activeTab,
+    isCourseStarred,
+    queueSyncCourse,
+    selectedCourseId,
+    setActiveTab,
+    setSelectedCourseId,
+    syncQueue,
+    syncingCourseId,
+    toggleCourseStar,
+  ]);
+
+  // Profile modal tabs
+  const [profileTab, setProfileTab] = useState("account");
+
+  // Theme settings (dark mode only)
+  const [theme] = useState("dark");
+  const [colorMode] = useState("standard");
+
+  // Subscription state
+  const [currentPlan, setCurrentPlan] = useState(localStorage.getItem("subscription_plan") || "free");
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+
+  const [selectedPlanKey, setSelectedPlanKey] = useState(null);
+
+  // Global font setting (applies app-wide)
+  const FONT_OPTIONS = {
+    sans: { label: "Inter", family: "'Inter', sans-serif" },
+    notebook: { label: "Patrick Hand", family: "'Patrick Hand', cursive" },
+    serif: { label: "Merriweather", family: "'Merriweather', serif" },
+    mono: { label: "Space Mono", family: "'Space Mono', monospace" },
+    roboto: { label: "Roboto", family: "'Roboto', sans-serif" },
+    lato: { label: "Lato", family: "'Lato', sans-serif" },
+    openSans: { label: "Open Sans", family: "'Open Sans', sans-serif" },
+    poppins: { label: "Poppins", family: "'Poppins', sans-serif" },
+  };
+
+
+  const PLAN_OPTIONS = {
+    free: {
+      key: "free",
+      name: "Free Tier",
+      price: "$0 / month",
+      summary: "Ads - Smaller model",
+      features: ["Ads", "Smaller model"],
+    },
+    plus: {
+      key: "plus",
+      name: "Plus Tier",
+      price: "$2 / month",
+      summary: "No ads - Better model - 2 weekly refreshes",
+      features: ["No ads", "Better model", "2 weekly refreshes"],
+      badge: "Popular",
+    },
+    pro: {
+      key: "pro",
+      name: "Pro Tier",
+      price: "$10 / month",
+      summary: "No ads - Best model - Unlimited weekly refreshes",
+      features: ["No ads", "Best model", "Unlimited weekly refreshes"],
+    },
+  };
+
+  const [globalFont, setGlobalFont] = useState(
+    localStorage.getItem("global_font") || "sans"
+  );
+
+  // Canvas creds now declared at top of component
+
+  useEffect(() => {
+    const family = (FONT_OPTIONS[globalFont]?.family) || FONT_OPTIONS.sans.family;
+    document.documentElement.style.setProperty("--app-font", family);
+    localStorage.setItem("global_font", globalFont);
+  }, [globalFont]);
+
+
+  useEffect(() => {
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem("color_mode", colorMode);
+  }, [colorMode]);
+
+  useEffect(() => {
+    localStorage.setItem("subscription_plan", currentPlan);
+  }, [currentPlan]);
+
+
+
+  // Home screen state
+  const [currentWeekStart, setCurrentWeekStart] = useState(new Date());
+  const [currentMonth, setCurrentMonth] = useState(new Date());
+
+  // useMemo for performance - itemsByCourse updates frequently
+  // Only include deliverable categories (ASSIGNMENT, EXAM)
+  const allItems = useMemo(() => {
+    return Object.values(itemsByCourse)
+      .flat()
+      .filter(item => ['ASSIGNMENT', 'EXAM', 'QUIZ'].includes(item.category?.toUpperCase()));
+  }, [itemsByCourse]);
+
+  async function connectCanvas() {
+    const baseUrl = canvasBaseUrl.trim();
+    const token = canvasToken.trim();
+
+
+    if (!baseUrl || !token) {
+      setCanvasStatus("Missing URL or token");
+      return;
+    }
+
+    setCanvasStatus("Connecting...");
+
+    try {
+      // Get fresh auth token for API calls
+      const authToken = await getAuthToken();
+      if (!authToken) {
+        setCanvasStatus("Please sign in first");
+        return;
+      }
+      const authHeaders = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${authToken}`
+      };
+
+      const testRes = await fetch(`${API_BASE}/api/canvas/test`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ base_url: baseUrl, token }),
+      });
+
+      const testData = await testRes.json();
+
+      if (!testData.valid) {
+        setCanvasStatus("Invalid token");
+        return;
+      }
+
+      // Save credentials to server (tied to Google account)
+      const saveCredsRes = await fetch(`${API_BASE}/api/user/canvas-credentials`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ base_url: baseUrl, token }),
+      });
+      if (!saveCredsRes.ok) {
+        let detail = `status ${saveCredsRes.status}`;
+        try {
+          const j = await saveCredsRes.json();
+          if (j?.error) detail = j.error;
+        } catch (_) {
+          // ignore
+        }
+        // Continue with the session token so the user can at least proceed,
+        // but warn that reloads may require reconnecting if the server can't persist creds.
+        console.warn("Failed to persist Canvas credentials:", detail);
+        setCanvasStatus(`Warning: couldn't save credentials (${detail})`);
+      }
+
+      // Keep only non-sensitive URL locally
+      localStorage.setItem("canvas_base_url", baseUrl);
+
+      setCanvasStatus("Fetching courses...");
+
+      const courseRes = await fetch(`${API_BASE}/api/canvas/courses`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ base_url: baseUrl, token }),
+      });
+
+      const courses = await courseRes.json();
+
+      // Check if courses API returned an error
+      if (!courseRes.ok) {
+        console.error('Courses API error:', courses);
+        const serverMsg = courses?.error ? `: ${courses.error}` : "";
+        setCanvasStatus(`Failed to fetch courses${serverMsg}`);
+        return;
+      }
+
+      // Ensure courses is an array
+      if (!Array.isArray(courses)) {
+        console.error('Courses response is not an array:', courses);
+        setCanvasStatus("Invalid courses response");
+        return;
+      }
+
+      // Debug: Log course data to see what Canvas API returns
+      console.log('Canvas courses received:', courses.length);
+      if (courses.length > 0) {
+        console.log('Sample course with term data:', courses[0]);
+        courses.forEach(c => {
+          console.log(`Course: ${c.name?.substring(0, 40) || 'Unknown'} | concluded: ${c.concluded} | term: ${c.term?.name} | term_end: ${c.term?.end_at}`);
+        });
+      }
+
+      const existingCourseCodeById = Object.fromEntries(
+        activeCourses.map(c => [normalizeCourseId(c.id), c.courseCode])
+      );
+      const existingCourseStatusById = Object.fromEntries(
+        activeCourses.map(c => [normalizeCourseId(c.id), c.status])
+      );
+      const savedCourseSyncState = getSavedCourseSyncState(baseUrl, token);
+
+      const active = courses
+        .filter((c) => c.workflow_state === "available")
+        .map((c) => {
+          const cid = normalizeCourseId(c.id);
+          const now = new Date();
+          const backendActiveFlag = typeof c._app_is_currently_active === "boolean"
+            ? c._app_is_currently_active
+            : null;
+
+          // Canvas API returns 'concluded' flag when include[]=concluded is used
+          // Also returns 'term' object with term dates when include[]=term is used
+          const isConcluded = c.concluded === true;
+
+          // Use term end date if available (most reliable)
+          const termEndAt = c.term?.end_at ? new Date(c.term.end_at) : null;
+          const termStartAt = c.term?.start_at ? new Date(c.term.start_at) : null;
+
+          // Course dates as fallback
+          const courseEndAt = c.end_at ? new Date(c.end_at) : null;
+          const courseStartAt = c.start_at ? new Date(c.start_at) : null;
+
+          // Use term dates first, then course dates
+          const effectiveEndAt = termEndAt || courseEndAt;
+          const effectiveStartAt = termStartAt || courseStartAt;
+
+          // Determine if course is currently active
+          let isCurrentlyActive;
+
+          if (backendActiveFlag !== null) {
+            isCurrentlyActive = backendActiveFlag;
+          } else if (isConcluded) {
+            // Canvas explicitly says this course is concluded
+            isCurrentlyActive = false;
+          } else if (effectiveEndAt && now > effectiveEndAt) {
+            // Term/course has ended
+            isCurrentlyActive = false;
+          } else if (effectiveStartAt && effectiveEndAt) {
+            // Has both dates - check if we're in range
+            isCurrentlyActive = now >= effectiveStartAt && now <= effectiveEndAt;
+          } else if (effectiveStartAt && !effectiveEndAt) {
+            // Has start but no end - active if we're past start
+            isCurrentlyActive = now >= effectiveStartAt;
+          } else {
+            // No dates or flags: don't mark everything as active.
+            isCurrentlyActive = false;
+          }
+
+          return {
+            id: cid,
+            name: c.name,
+            courseCode: deriveCourseCode(existingCourseCodeById[cid] || c.course_code, c.name),
+            status: existingCourseStatusById[cid] || savedCourseSyncState[cid] || "NOT_SYNCED",
+            startAt: effectiveStartAt?.toISOString(),
+            endAt: effectiveEndAt?.toISOString(),
+            termName: c.term?.name || null,
+            isCurrentlyActive,
+          };
+        });
+
+      setActiveCourses(active);
+      setCanvasStatus("Connected");
+    } catch (err) {
+      console.error('Canvas connection error:', err);
+      setCanvasStatus(`Connection failed: ${err.message || 'Network error'}`);
+    }
+  }
+
+  function disconnectCanvas() {
+    clearSavedCourseSyncState(canvasBaseUrl, canvasToken);
+    localStorage.removeItem("canvas_base_url");
+    setCanvasBaseUrl("");
+    setCanvasToken("");
+    setActiveCourses([]);
+    setItemsByCourse({});
+    setCanvasStatus("Disconnected");
+  }
+
+  async function syncCourse(courseIdInput) {
+    const courseId = normalizeCourseId(courseIdInput);
+    const token = (canvasToken || "").trim();
+    const baseUrl = (canvasBaseUrl || localStorage.getItem("canvas_base_url") || "").trim();
+
+    if (!token || !baseUrl) {
+      alert("Please connect to Canvas first");
+      return;
+    }
+
+    // Get fresh auth token for API calls
+    const authToken = await getAuthToken();
+    if (!authToken) {
+      alert("Please sign in first");
+      return;
+    }
+    const authHeaders = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${authToken}`
+    };
+
+    setIsSyncing(true);
+    setSyncingCourseId(courseId);
+    setSyncStatus((prev) => ({ ...prev, [courseId]: "Syncing materials..." }));
+
+    try {
+      setSyncStatus((prev) => ({
+        ...prev,
+        [courseId]: "Fetching syllabus & schedule files...",
+      }));
+
+      const materialsRes = await fetch(
+        `${API_BASE}/api/sync_course_materials`,
+        {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({
+            base_url: baseUrl,
+            token,
+            course_id: courseId,
+          }),
+        }
+      );
+
+      const materialsData = await materialsRes.json();
+
+      if (!materialsRes.ok) {
+        throw new Error("Failed to sync materials");
+      }
+
+      setSyncStatus((prev) => ({
+        ...prev,
+        [courseId]: `Found ${materialsData.materials_extracted} materials`,
+      }));
+
+      await fetch(`${API_BASE}/api/sync_announcements`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          base_url: baseUrl,
+          token,
+          course_ids: [courseId],
+        }),
+      });
+
+      setSyncStatus((prev) => ({
+        ...prev,
+        [courseId]: "Syncing assignments...",
+      }));
+
+      const assignmentsRes = await fetch(
+        `${API_BASE}/api/sync_assignments`,
+        {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify({
+            base_url: baseUrl,
+            token,
+            course_id: courseId,
+          }),
+        }
+      );
+
+      if (!assignmentsRes.ok) {
+        throw new Error("Failed to sync assignments");
+      }
+
+      setSyncStatus((prev) => ({
+        ...prev,
+        [courseId]: "Resolving dates with AI...",
+      }));
+
+      const resolveRes = await fetch(`${API_BASE}/api/resolve_course_dates`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          course_id: courseId,
+          course_timezone: "America/New_York",
+        }),
+      });
+
+      if (!resolveRes.ok) {
+        throw new Error("Failed to resolve course dates");
+      }
+
+      const finalRes = await fetch(`${API_BASE}/api/sync_assignments`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({
+          base_url: baseUrl,
+          token,
+          course_id: courseId,
+        }),
+      });
+
+      if (!finalRes.ok) {
+        throw new Error("Failed to fetch final assignments");
+      }
+
+      const finalData = await finalRes.json();
+      const courseObj = activeCourses.find(c => normalizeCourseId(c.id) === courseId);
+
+      const assignList = (finalData && (finalData.a || finalData.assignments)) || [];
+
+      const normalizedAssignments = assignList.map((a) => {
+        const idPart = a.cid ?? a.canvas_assignment_id ?? a.nam ?? a.name ?? "item";
+
+        return {
+          id: `${courseId}-${idPart}`,
+          courseId,
+          courseName: courseObj?.name || "Unknown",
+          courseCode: deriveCourseCode(courseObj?.courseCode, courseObj?.name),
+
+          name: a.nam ?? a.name ?? "",
+          due: a.due ?? a.normalized_due_at ?? a.due_at ?? a.original_due_at ?? null,
+
+          status: a.st ?? a.status ?? null,
+          category: String(a.cat ?? a.category ?? "ASSIGNMENT").toUpperCase(),
+        };
+      });
+
+
+
+
+
+      setItemsByCourse((prev) => ({
+        ...prev,
+        [courseId]: normalizedAssignments,
+      }));
+
+      setSyncStatus((prev) => ({ ...prev, [courseId]: "Sync Complete" }));
+
+      // Auto-assign random color if course doesn't have one yet (avoiding duplicates)
+      setCourseColors(prev => {
+        if (!prev[courseId]) {
+          const usedColors = Object.values(prev);
+          const availableColors = COURSE_COLOR_PALETTE.filter(c => !usedColors.includes(c.hex));
+          const colorPool = availableColors.length > 0 ? availableColors : COURSE_COLOR_PALETTE;
+          const randomColor = colorPool[Math.floor(Math.random() * colorPool.length)].hex;
+          return { ...prev, [courseId]: randomColor };
+        }
+        return prev;
+      });
+
+      setActiveCourses((prev) =>
+        prev.map((c) => (normalizeCourseId(c.id) === courseId ? { ...c, status: "SYNCED" } : c))
+      );
+      const savedSyncState = getSavedCourseSyncState(baseUrl, token);
+      savedSyncState[courseId] = "SYNCED";
+      setSavedCourseSyncState(savedSyncState, baseUrl, token);
+    } catch (err) {
+      console.error("Sync failed", err);
+      setSyncStatus((prev) => ({
+        ...prev,
+        [courseId]: `Sync Failed: ${err?.message || String(err)}`,
+      }));
+    } finally {
+      setIsSyncing(false);
+      setSyncingCourseId(null);
+      // Remove from queue and continue processing
+      setSyncQueue(prev => prev.slice(1));
+      isProcessingQueue.current = false;
+    }
+  }
+
+  // Process the sync queue
+  const processQueue = useCallback(async () => {
+    if (syncQueue.length === 0 || isProcessingQueue.current || syncingCourseId) {
+      return;
+    }
+
+    isProcessingQueue.current = true;
+    const nextCourseId = syncQueue[0];
+    await syncCourse(nextCourseId);
+  }, [syncQueue, activeCourses, syncingCourseId]);
+
+  // Effect to process queue when it changes
+  useEffect(() => {
+    if (syncQueue.length > 0 && !isProcessingQueue.current) {
+      processQueue();
+    }
+  }, [syncQueue, processQueue]);
+
+  const normalizedSelectedCourseId = normalizeCourseId(selectedCourseId);
+  const selectedCourse = activeCourses.find((c) => normalizeCourseId(c.id) === normalizedSelectedCourseId);
+  const courseItems = itemsByCourse[normalizedSelectedCourseId] || [];
+  const currentSyncStatus = syncStatus[normalizedSelectedCourseId];
+
+  const CATEGORY_ORDER = {
+    EXAM: 0,
+    ASSIGNMENT: 1,
+    PLACEHOLDER: 2,
+    PENDING: 3,
+  };
+
+  const toTime = (iso) => {
+    const d = parseDueToDate(iso);
+    return d ? d.getTime() : Number.POSITIVE_INFINITY;
+  };
+
+
+  const sortedCourseItems = [...courseItems]
+    .map((i) => ({
+      ...i,
+      category: (i.category || "ASSIGNMENT").toUpperCase(),
+    }))
+    .sort((a, b) => {
+      const ao = CATEGORY_ORDER[a.category] ?? 99;
+      const bo = CATEGORY_ORDER[b.category] ?? 99;
+      if (ao !== bo) return ao - bo;
+
+      const at = toTime(a.due);
+      const bt = toTime(b.due);
+      if (at !== bt) return at - bt;
+
+      return (a.name || "").localeCompare(b.name || "");
+    });
+
+  // Filter items for current week
+  // Filter items for current week
+  // Filter items for current week
+  const weekDates = useMemo(() => getWeekDates(currentWeekStart), [currentWeekStart]);
+
+  // Normalize week bounds to local midnight to avoid time-of-day bugs
+  const weekStart = useMemo(() => new Date(weekDates[0].getFullYear(), weekDates[0].getMonth(), weekDates[0].getDate(), 0, 0, 0, 0), [weekDates]);
+  const weekEnd = useMemo(() => new Date(weekDates[6].getFullYear(), weekDates[6].getMonth(), weekDates[6].getDate(), 0, 0, 0, 0), [weekDates]);
+
+
+  const weekItems = useMemo(() => allItems
+    .filter((item) => {
+      // 1. Date Range Check
+      const due = parseDueToDate(item.due);
+      if (!due) return false;
+      const inRange = due >= weekStart && due <= addDays(weekEnd, 1);
+      if (!inRange) return false;
+
+      // 2. Category Filter Check
+      if (weeklyFilters[item.category] === false) return false;
+
+      return true;
+    })
+    .sort((a, b) => toTime(a.due) - toTime(b.due)), [allItems, weekStart, weekEnd, weeklyFilters]);
+
+
+  // Calculate progress
+  const completedThisWeek = weekItems.filter(item => completedItems[item.id]).length;
+  const progressPercent = weekItems.length > 0 ? (completedThisWeek / weekItems.length) * 100 : 0;
+
+  // Confetti - using canvas-confetti library
+  const progressBarRef = useRef(null);
+  const prevProgressRef = useRef(progressPercent);
+
+  // Fire confetti explosion from progress bar
+  const fireConfetti = useCallback(() => {
+    // Load canvas-confetti from CDN if not already loaded
+    if (!window.confetti) {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js';
+      script.onload = () => fireConfettiBurst();
+      document.head.appendChild(script);
+    } else {
+      fireConfettiBurst();
+    }
+  }, []);
+
+  const fireConfettiBurst = useCallback(() => {
+    if (!window.confetti || !progressBarRef.current) return;
+
+    const rect = progressBarRef.current.getBoundingClientRect();
+    const originX = (rect.left + rect.width / 2) / window.innerWidth;
+    const originY = (rect.top + rect.height * 0.3) / window.innerHeight;
+
+    const defaults = {
+      origin: { x: originX, y: originY },
+      colors: ['#22c55e', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899'],
+      zIndex: 9999,
+      disableForReducedMotion: true,
+    };
+
+    // Burst 1: Upward fan
+    window.confetti({
+      ...defaults,
+      particleCount: 30,
+      spread: 60,
+      angle: 90,
+      startVelocity: 45,
+      gravity: 1.2,
+      scalar: 0.9,
+      ticks: 150,
+    });
+
+    // Burst 2: Left spray (delayed)
+    setTimeout(() => {
+      window.confetti({
+        ...defaults,
+        particleCount: 20,
+        spread: 50,
+        angle: 120,
+        startVelocity: 35,
+        gravity: 1,
+        scalar: 0.8,
+        ticks: 120,
+      });
+    }, 100);
+
+    // Burst 3: Right spray (delayed)
+    setTimeout(() => {
+      window.confetti({
+        ...defaults,
+        particleCount: 20,
+        spread: 50,
+        angle: 60,
+        startVelocity: 35,
+        gravity: 1,
+        scalar: 0.8,
+        ticks: 120,
+      });
+    }, 100);
+
+    // Burst 4: Small follow-up poof
+    setTimeout(() => {
+      window.confetti({
+        ...defaults,
+        particleCount: 15,
+        spread: 100,
+        angle: 90,
+        startVelocity: 20,
+        gravity: 0.8,
+        scalar: 0.6,
+        ticks: 100,
+      });
+    }, 250);
+  }, []);
+
+  // Trigger confetti when progress reaches 100%
+  useEffect(() => {
+    if (progressPercent === 100 && prevProgressRef.current < 100 && weekItems.length > 0) {
+      fireConfetti();
+    }
+    prevProgressRef.current = progressPercent;
+  }, [progressPercent, weekItems.length, fireConfetti]);
+
+  // Group items by day for weekly todo view
+  const itemsByDay = useMemo(() => {
+    const grouped = {};
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    weekDates.forEach((date, idx) => {
+      const dayName = dayNames[idx];
+      const dateKey = date.toDateString();
+      grouped[dayName] = {
+        date: date,
+        items: weekItems
+          .filter((item) => {
+            const itemDate = parseDueToDate(item.due);
+            if (!itemDate) return false;
+            return itemDate.toDateString() === dateKey;
+          })
+          .sort((a, b) => {
+            const aTime = parseDueToDate(a.due)?.getTime() ?? Number.POSITIVE_INFINITY;
+            const bTime = parseDueToDate(b.due)?.getTime() ?? Number.POSITIVE_INFINITY;
+            return aTime - bTime;
+          }),
+      };
+    });
+    return grouped;
+  }, [weekDates, weekItems]);
+
+  const toggleComplete = (itemId) => {
+    setCompletedItems(prev => {
+      const next = { ...prev };
+      if (next[itemId]) {
+        delete next[itemId];
+      } else {
+        next[itemId] = true;
+      }
+      return next;
+    });
+  };
+
+  const navigateWeek = (direction) => {
+    setCurrentWeekStart(prev => {
+      const newDate = new Date(prev);
+      newDate.setDate(newDate.getDate() + (direction * 7));
+      return newDate;
+    });
+  };
+
+  const navigateMonth = (direction) => {
+    setCurrentMonth(prev => {
+      const newDate = new Date(prev);
+      newDate.setMonth(newDate.getMonth() + direction);
+      return newDate;
+    });
+  };
+
+  // Pre-compute items by date string for O(1) calendar lookup
+  const itemsByDateStr = useMemo(() => {
+    const map = {};
+    allItems.forEach(item => {
+      // Apply filters here too so calendar reflects filters
+      if (weeklyFilters[item.category] === false) return;
+
+      const d = parseDueToDate(item.due);
+      if (d) {
+        const key = d.toDateString();
+        if (!map[key]) map[key] = [];
+        map[key].push(item);
+      }
+    });
+    // Sort each day's items once
+    Object.values(map).forEach(list => {
+      list.sort((a, b) => toTime(a.due) - toTime(b.due));
+    });
+    return map;
+  }, [allItems, weeklyFilters]);
+
+  // Get items by date for calendar (O(1) access)
+  const getItemsForDate = useCallback((date) => {
+    return itemsByDateStr[date.toDateString()] || [];
+  }, [itemsByDateStr]);
+
+  // Show loading while checking auth
+  if (authLoading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-black text-white">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p>Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show landing + login screen if not authenticated
+  if (!firebaseUser) {
+    return (
+      <div className="min-h-screen bg-[#06080c] text-white">
+        <style>{`
+          @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap');
+          .landing-font { font-family: 'Space Grotesk', sans-serif; }
+          .landing-grid {
+            background-image:
+              linear-gradient(to right, rgba(255,255,255,0.04) 1px, transparent 1px),
+              linear-gradient(to bottom, rgba(255,255,255,0.04) 1px, transparent 1px);
+            background-size: 46px 46px;
+          }
+        `}</style>
+
+        <div className="landing-font min-h-screen landing-grid">
+          <header className="max-w-6xl mx-auto px-6 pt-8 pb-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-md bg-blue-500/20 border border-blue-500/40 flex items-center justify-center">
+                <span className="text-sm font-bold text-blue-300">CS</span>
+              </div>
+              <span className="text-lg font-semibold tracking-tight">CanvasSync</span>
+            </div>
+            <button
+              onClick={handleGoogleSignIn}
+              className="text-sm px-4 py-2 rounded-md border border-zinc-700 text-zinc-200 hover:border-zinc-500 hover:text-white transition-colors"
+            >
+              Sign in
+            </button>
+          </header>
+
+          <main className="max-w-6xl mx-auto px-6 pb-14 pt-10 grid lg:grid-cols-2 gap-10 items-center">
+            <section>
+              <p className="text-xs uppercase tracking-[0.2em] text-blue-300 mb-4">Canvas workflow, simplified</p>
+              <h1 className="text-4xl md:text-5xl font-bold leading-tight">
+                See every deadline in one clean weekly view.
+              </h1>
+              <p className="mt-5 text-zinc-300 text-base md:text-lg max-w-xl">
+                CanvasSync keeps your courses, assignments, and tags organized so you can focus on the work instead of chasing dates.
+              </p>
+
+              <div className="mt-8 flex flex-col sm:flex-row gap-3">
+                <button
+                  onClick={handleGoogleSignIn}
+                  className="inline-flex items-center justify-center gap-3 bg-white text-black px-6 py-3 rounded-md font-medium hover:bg-zinc-100 transition"
+                >
+                  <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                  </svg>
+                  Continue with Google
+                </button>
+                <span className="inline-flex items-center text-sm text-zinc-400">
+                  Secure sign-in and cloud sync
+                </span>
+              </div>
+
+              <div className="mt-10 grid sm:grid-cols-3 gap-3 text-sm">
+                <div className="p-3 rounded-md border border-zinc-800 bg-zinc-950/70">
+                  <p className="text-zinc-200 font-medium">Course tags that stick</p>
+                  <p className="text-zinc-500 mt-1">Stable labels between reloads</p>
+                </div>
+                <div className="p-3 rounded-md border border-zinc-800 bg-zinc-950/70">
+                  <p className="text-zinc-200 font-medium">Single-token focus</p>
+                  <p className="text-zinc-500 mt-1">Only connected Canvas data shown</p>
+                </div>
+                <div className="p-3 rounded-md border border-zinc-800 bg-zinc-950/70">
+                  <p className="text-zinc-200 font-medium">Fast weekly planning</p>
+                  <p className="text-zinc-500 mt-1">One timeline for every course</p>
+                </div>
+              </div>
+            </section>
+
+            <section className="relative">
+              <div className="absolute -inset-10 bg-blue-600/10 blur-3xl rounded-full pointer-events-none" />
+              <div className="relative border border-zinc-800 rounded-xl bg-zinc-950/80 backdrop-blur p-5 shadow-2xl">
+                <div className="flex items-center justify-between pb-4 border-b border-zinc-800">
+                  <p className="text-sm text-zinc-400">This Week</p>
+                  <p className="text-xs px-2 py-1 rounded bg-blue-900/40 text-blue-300 border border-blue-900">Synced</p>
+                </div>
+                <div className="mt-4 space-y-3">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-zinc-200">MATH 3235 - Homework 4</span>
+                    <span className="text-zinc-400">Mon</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-zinc-200">CS 1332 - Quiz 2</span>
+                    <span className="text-zinc-400">Wed</span>
+                  </div>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-zinc-200">PHYS 2211 - Lab Report</span>
+                    <span className="text-zinc-400">Thu</span>
+                  </div>
+                </div>
+                <div className="mt-5 h-2 rounded-full bg-zinc-800 overflow-hidden">
+                  <div className="h-full w-2/3 bg-blue-500" />
+                </div>
+                <p className="mt-2 text-xs text-zinc-500">4 of 6 tasks complete</p>
+              </div>
+            </section>
+          </main>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`h-screen flex flex-col bg-black app-font theme-app ${theme === "light" ? "theme-light" : "theme-dark"} ${colorMode === "vibrant" ? "mode-vibrant" : "mode-standard"}`}>
+      {/* Font Imports */}
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Patrick+Hand&family=Merriweather:wght@400;700&family=Space+Mono:wght@400;700&family=Roboto:wght@400;700&family=Lato:wght@400;700&family=Open+Sans:wght@400;700&family=Poppins:wght@400;600;700&display=swap');
+
+        :root { --app-font: 'Inter', sans-serif; }
+        .app-font { font-family: var(--app-font); }
+
+        /* Backwards compatibility: old class names now just use the global font */
+        .font-notebook { font-family: var(--app-font); }
+
+
+/* Theme variables - Dark Standard Mode Only */
+.theme-app.theme-dark.mode-standard {
+  --app-bg: #000000;
+  --surface-1: #09090b;
+  --surface-2: #18181b;
+  --surface-3: #27272a;
+  --surface-4: #3f3f46;
+  --text-1: #ffffff;
+  --text-2: #e4e4e7;
+  --text-3: #d4d4d8;
+  --text-4: #a1a1aa;
+  --text-5: #71717a;
+  --border-1: #27272a;
+  --border-2: #3f3f46;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+}
+
+/* Map existing Tailwind utility classes to the theme variables */
+.theme-app { background-color: var(--app-bg) !important; color: var(--text-1); }
+.theme-app.bg-black { background-color: var(--app-bg) !important; }
+.theme-app .bg-black { background-color: var(--app-bg) !important; }
+
+.theme-app .bg-zinc-950 { background-color: var(--surface-1) !important; }
+.theme-app .bg-zinc-900 { background-color: var(--surface-2) !important; }
+.theme-app .bg-zinc-800 { background-color: var(--surface-3) !important; }
+.theme-app .bg-zinc-700 { background-color: var(--surface-4) !important; }
+
+.theme-app .hover\\:bg-zinc-900:hover { background-color: var(--surface-2) !important; }
+.theme-app .hover\\:bg-zinc-800:hover { background-color: var(--surface-3) !important; }
+.theme-app .hover\\:bg-zinc-700:hover { background-color: var(--surface-4) !important; }
+
+.theme-app .text-white { color: var(--text-1) !important; }
+.theme-app .text-zinc-200 { color: var(--text-2) !important; }
+.theme-app .text-zinc-300 { color: var(--text-3) !important; }
+.theme-app .text-zinc-400 { color: var(--text-4) !important; }
+.theme-app .text-zinc-500 { color: var(--text-5) !important; }
+
+.theme-app .border-zinc-800 { border-color: var(--border-1) !important; }
+.theme-app .border-zinc-700 { border-color: var(--border-2) !important; }
+
+.theme-app .bg-blue-600 { background-color: var(--accent) !important; }
+.theme-app .hover\\:bg-blue-700:hover { background-color: var(--accent-hover) !important; }
+.theme-app .focus\\:border-blue-500:focus { border-color: var(--accent) !important; }
+
+
+        @keyframes fadeInUp {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-enter { animation: fadeInUp 0.4s ease-out forwards; }
+
+      `}</style>
+
+
+      {/* Profile Popup */}
+      {showProfilePopup && (
+        <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
+          <div className="bg-zinc-900 rounded-lg shadow-xl w-full max-w-md p-6 relative border border-zinc-800">
+            <button
+              onClick={() => setShowProfilePopup(false)}
+              className="absolute top-4 right-4 text-zinc-500 hover:text-white"
+              aria-label="Close"
+            >
+              <X size={20} />
+            </button>
+
+            <h2 className="text-xl font-semibold mb-4 text-white">Profile</h2>
+
+            {/* Sections */}
+            <div className="flex gap-4">
+              <div className="w-32 shrink-0">
+                <div className="space-y-1">
+                  <button
+                    onClick={() => setProfileTab("account")}
+                    className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${profileTab === "account"
+                      ? "bg-blue-600 text-white"
+                      : "bg-transparent hover:bg-zinc-800 text-zinc-400 hover:text-white"
+                      }`}
+                  >
+                    Account
+                  </button>
+                  <button
+                    onClick={() => setProfileTab("settings")}
+                    className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${profileTab === "settings"
+                      ? "bg-blue-600 text-white"
+                      : "bg-transparent hover:bg-zinc-800 text-zinc-400 hover:text-white"
+                      }`}
+                  >
+                    Settings
+                  </button>
+                  <button
+                    onClick={() => setProfileTab("upgrade")}
+                    className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${profileTab === "upgrade"
+                      ? "bg-blue-600 text-white"
+                      : "bg-transparent hover:bg-zinc-800 text-zinc-400 hover:text-white"
+                      }`}
+                  >
+                    Upgrade
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex-1 min-w-0">
+                {/* SETTINGS TAB */}
+                {profileTab === "settings" && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-400 mb-2">
+                        Font (global)
+                      </label>
+                      <select
+                        value={globalFont}
+                        onChange={(e) => setGlobalFont(e.target.value)}
+                        className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
+                      >
+                        {Object.entries(FONT_OPTIONS).map(([key, opt]) => (
+                          <option key={key} value={key}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-zinc-500 mt-2">
+                        Applies to the whole app (including the "notebook" sections).
+                      </p>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        className="px-4 py-2 rounded bg-zinc-800 hover:bg-zinc-700 text-white"
+                        onClick={() => setShowProfilePopup(false)}
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* UPGRADE TAB */}
+                {profileTab === "upgrade" && (
+                  <div className="space-y-4">
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm text-zinc-200 font-medium">Current plan</p>
+                          <p className="text-xs text-zinc-500 mt-1">
+                            {PLAN_OPTIONS[currentPlan]?.name || "Free Tier"}
+                          </p>
+                        </div>
+                        <span className="text-xs px-2 py-1 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                          Mock
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Mini plan picker */}
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950 p-3">
+                      <p className="text-sm text-zinc-200 font-medium mb-2">Choose a plan</p>
+
+                      <div className="space-y-2">
+                        {Object.values(PLAN_OPTIONS).map((plan) => (
+                          <button
+                            key={plan.key}
+                            onClick={() => {
+                              setSelectedPlanKey(plan.key);
+                              setShowUpgradeModal(true);
+                            }}
+                            className={`w-full text-left px-3 py-2 rounded-md border transition-colors ${plan.key === currentPlan
+                              ? "bg-zinc-800 border-zinc-700"
+                              : "bg-transparent border-zinc-800 hover:bg-zinc-900"
+                              }`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-medium text-white truncate">{plan.name}</p>
+                                  {plan.badge && (
+                                    <span className="text-[10px] px-2 py-0.5 rounded bg-blue-600 text-white">
+                                      {plan.badge}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-zinc-500 mt-1">{plan.summary}</p>
+                              </div>
+                              <p className="text-xs text-zinc-400 whitespace-nowrap">{plan.price}</p>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+
+                      <p className="text-xs text-zinc-500 mt-3">
+                        This is a mock subscription selector (no real payments).
+                      </p>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        className="px-4 py-2 rounded bg-zinc-800 hover:bg-zinc-700 text-white"
+                        onClick={() => setShowProfilePopup(false)}
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ACCOUNT TAB */}
+                {profileTab === "account" && (
+                  <div className="space-y-4">
+                    {/* Quick summary */}
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950 p-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm text-zinc-200 font-medium">Canvas</p>
+                        <span
+                          className={`text-xs px-2 py-1 rounded ${canvasBaseUrl && canvasToken
+                            ? "bg-green-950 text-green-300 border border-green-900"
+                            : "bg-zinc-800 text-zinc-300 border border-zinc-700"
+                            }`}
+                        >
+                          {canvasBaseUrl && canvasToken ? "Configured" : "Not configured"}
+                        </span>
+                      </div>
+                      <div className="mt-2 text-xs text-zinc-500 space-y-1">
+                        <div>
+                          Base URL: <span className="text-zinc-300">{canvasBaseUrl || "--"}</span>
+                        </div>
+                        <div>
+                          Token:{" "}
+                          <span className="text-zinc-300">
+                            {canvasToken ? `****${canvasToken.slice(-4)}` : "--"}
+                          </span>
+                        </div>
+                        <div>
+                          Current font:{" "}
+                          <span className="text-zinc-300">
+                            {FONT_OPTIONS[globalFont]?.label || FONT_OPTIONS.sans.label}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Canvas credentials */}
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-400 mb-2">
+                        Canvas URL
+                      </label>
+                      <input
+                        value={canvasBaseUrl}
+                        onChange={(e) => setCanvasBaseUrl(e.target.value)}
+                        className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
+                        placeholder="https://gatech.instructure.com"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-zinc-400 mb-2">
+                        Access Token
+                      </label>
+                      <input
+                        type="password"
+                        value={canvasToken}
+                        onChange={(e) => setCanvasToken(e.target.value)}
+                        className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
+                        placeholder="Paste your Canvas token"
+                      />
+                    </div>
+
+                    <div className="flex gap-2 justify-end">
+                      <button
+                        className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white"
+                        onClick={() => connectCanvas()}
+                      >
+                        Connect
+                      </button>
+
+                      <button
+                        className="px-4 py-2 rounded bg-zinc-800 hover:bg-zinc-700 text-white"
+                        onClick={() => disconnectCanvas()}
+                      >
+                        Disconnect
+                      </button>
+
+                      <button
+                        className="px-4 py-2 rounded bg-zinc-800 hover:bg-zinc-700 text-white"
+                        onClick={() => setShowProfilePopup(false)}
+                      >
+                        Close
+                      </button>
+                    </div>
+
+                    {canvasStatus && (
+                      <div
+                        className={`mt-2 p-3 rounded text-sm ${canvasStatus.includes("Connected")
+                          ? "bg-green-950 text-green-300 border border-green-900"
+                          : "bg-zinc-800 text-zinc-300"
+                          }`}
+                      >
+                        {canvasStatus}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+
+
+      {/* Upgrade Modal (large) */}
+      {showUpgradeModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-[60]">
+          <div className="bg-zinc-900 rounded-lg shadow-2xl w-full max-w-2xl p-6 relative border border-zinc-800">
+            <button
+              onClick={() => setShowUpgradeModal(false)}
+              className="absolute top-4 right-4 text-zinc-500 hover:text-white"
+              aria-label="Close"
+            >
+              <X size={20} />
+            </button>
+
+            <h3 className="text-lg font-semibold text-white">Upgrade account</h3>
+            <p className="text-sm text-zinc-500 mt-1">
+              Mock subscription selection (no real payment flow).
+            </p>
+
+            {selectedPlanKey && (
+              <div className="mt-5 rounded-md border border-zinc-800 bg-zinc-950 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-base font-semibold text-white">
+                      {PLAN_OPTIONS[selectedPlanKey]?.name}
+                    </p>
+                    <p className="text-sm text-zinc-500 mt-1">
+                      {PLAN_OPTIONS[selectedPlanKey]?.summary}
+                    </p>
+                  </div>
+                  <p className="text-sm text-zinc-300 whitespace-nowrap">
+                    {PLAN_OPTIONS[selectedPlanKey]?.price}
+                  </p>
+                </div>
+
+                <ul className="mt-4 space-y-2">
+                  {(PLAN_OPTIONS[selectedPlanKey]?.features || []).map((feature) => (
+                    <li key={feature} className="flex items-start gap-2 text-sm text-zinc-300">
+                      <CheckCircle2 size={16} className="mt-0.5 text-green-400" />
+                      <span>{feature}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                className="px-4 py-2 rounded bg-zinc-800 hover:bg-zinc-700 text-white"
+                onClick={() => setShowUpgradeModal(false)}
+              >
+                Cancel
+              </button>
+
+              <button
+                className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white"
+                onClick={() => {
+                  if (selectedPlanKey) setCurrentPlan(selectedPlanKey);
+                  setShowUpgradeModal(false);
+                }}
+              >
+                {selectedPlanKey === currentPlan ? "Keep current plan" : "Select plan"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Top Bar with Profile */}
+      <div className="flex items-center justify-between px-6 py-2 bg-zinc-950 border-b border-zinc-800">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            className="p-2 hover:bg-zinc-800 rounded text-zinc-400"
+          >
+            <Menu size={20} />
+          </button>
+          <h1 className="text-xl font-semibold text-white tracking-tight">CanvasSync</h1>
+          <span className="text-zinc-600 mx-2">|</span>
+          <span className="text-sm font-medium text-zinc-400">
+            {activeTab === "home" ? "Weekly Tasks" : activeTab === "calendar" ? "Calendar" : "Course View"}
+          </span>
+        </div>
+        <button
+          onClick={() => setShowProfilePopup(true)}
+          className="w-9 h-9 rounded-full bg-zinc-800 hover:bg-zinc-700 flex items-center justify-center text-white transition-colors"
+        >
+          <User size={18} />
+        </button>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* SIDEBAR */}
+        {!sidebarCollapsed && (
+          <aside className="w-64 border-r border-zinc-900 bg-black flex flex-col overflow-hidden">
+            <div className="px-4 py-4 border-b border-zinc-800">
+              <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Navigation</h2>
+            </div>
+
+            <div className="p-2 space-y-1">
+              <button
+                onClick={() => setActiveTab("home")}
+                className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === "home"
+                  ? "bg-blue-600 text-white"
+                  : "bg-transparent hover:bg-zinc-900 text-zinc-400"
+                  }`}
+              >
+                <List size={18} />
+                Weekly
+              </button>
+
+              <button
+                onClick={() => setActiveTab("calendar")}
+                className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${activeTab === "calendar"
+                  ? "bg-blue-600 text-white"
+                  : "bg-transparent hover:bg-zinc-900 text-zinc-400"
+                  }`}
+              >
+                <Calendar size={18} />
+                Calendar
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto">
+              <div className="px-4 py-3 border-t border-zinc-900 mt-2">
+                <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Courses</h2>
+              </div>
+
+              {hasStarredCourses && (
+                <div className="pb-2">
+                  <div className="px-4 py-2 text-[10px] font-semibold text-zinc-600 uppercase tracking-wider">Starred</div>
+                  <div className="px-2 space-y-1">
+                    {starredActiveCourseList.map((course) => renderCourseNavItem(course, { muted: false }))}
+                    {starredPastCourseList.map((course) => renderCourseNavItem(course, { muted: true }))}
+                  </div>
+                </div>
+              )}
+
+              <div className="pb-2">
+                <div className="px-4 py-2 text-[10px] font-semibold text-zinc-600 uppercase tracking-wider">Active</div>
+                <div className="px-2 space-y-1">
+                  {activeUnstarredCourseList.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-zinc-600 italic">No active courses</p>
+                  ) : (
+                    activeUnstarredCourseList.map((course) => renderCourseNavItem(course, { muted: false }))
+                  )}
+                </div>
+              </div>
+
+              <div className="pb-4">
+                <div className="px-4 py-2 text-[10px] font-semibold text-zinc-600 uppercase tracking-wider">Inactive</div>
+                <div className="px-2 space-y-1">
+                  {pastUnstarredCourseList.length === 0 ? (
+                    <p className="px-3 py-2 text-xs text-zinc-600 italic">No inactive courses</p>
+                  ) : (
+                    pastUnstarredCourseList.map((course) => renderCourseNavItem(course, { muted: true }))
+                  )}
+                </div>
+              </div>
+            </div>
+          </aside>
+        )}
+
+        {/* MAIN */}
+        <main className="flex-1 flex flex-col overflow-hidden bg-black">
+          {activeTab === "home" && (
+            <div className="flex-1 flex flex-col overflow-hidden animate-enter">
+              {/* Toolbar Strip with Navigation, Filter and Color Dropdowns */}
+              <div className="h-11 flex items-center justify-between px-6 border-b border-zinc-800 bg-zinc-900/50">
+                {/* Week Navigation */}
+                <div className="flex items-center gap-2">
+                  <button onClick={() => navigateWeek(-1)} className="p-1 hover:bg-zinc-800 rounded text-zinc-400"><ChevronLeft size={18} /></button>
+                  <span className="text-sm font-medium text-zinc-300 w-40 text-center">
+                    {weekDates[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - {weekDates[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  </span>
+                  <button onClick={() => navigateWeek(1)} className="p-1 hover:bg-zinc-800 rounded text-zinc-400"><ChevronRight size={18} /></button>
+                  <button onClick={() => setCurrentWeekStart(new Date())} className="ml-1 text-xs px-2 py-1 bg-blue-900/30 text-blue-300 border border-blue-900 rounded hover:bg-blue-900/50">Today</button>
+                </div>
+
+                {/* Color and Filter Controls */}
+                <div className="flex items-center gap-3">
+                  {/* Color Dropdown */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowColorDropdown(!showColorDropdown)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-colors ${showColorDropdown ? "bg-zinc-700 text-white" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"}`}
+                    >
+                      <Palette size={16} />
+                      <span>Colors</span>
+                    </button>
+
+                    {showColorDropdown && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => { setShowColorDropdown(false); setShowColorPicker(null); }} />
+                        <div className="absolute right-0 top-full mt-1 bg-zinc-900 rounded-lg shadow-xl border border-zinc-800 z-50 py-2 overflow-visible">
+                          <div className="px-3 py-1.5 border-b border-zinc-800 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">
+                            Course Colors
+                          </div>
+                          <div className="px-3 pb-2 space-y-1">
+                            {syncedCourseList.map(course => (
+                              <div key={course.id} className="relative">
+                                <button
+                                  onClick={() => setShowColorPicker(showColorPicker === course.id ? null : course.id)}
+                                  className={`w-full flex items-center justify-between gap-3 px-2 py-1.5 rounded transition-colors ${showColorPicker === course.id ? 'bg-zinc-700 ring-1 ring-zinc-500' : 'hover:bg-zinc-800'}`}
+                                >
+                                  <span className="text-xs text-zinc-300 truncate text-left" title={course.name}>
+                                    {course.name}
+                                  </span>
+                                  <div
+                                    className={`w-4 h-4 rounded-full shrink-0 ring-1 ring-zinc-600 ${getCourseColorClasses(courseColors[course.id]).dot}`}
+                                  />
+                                </button>
+                                {showColorPicker === course.id && (
+                                  <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 bg-zinc-800 rounded-lg shadow-xl border border-zinc-700 z-50 p-2">
+                                    <div className="grid grid-cols-3 gap-1.5 w-[72px]">
+                                      {COURSE_COLOR_PALETTE.map(color => (
+                                        <button
+                                          key={color.hex}
+                                          onClick={() => { setCourseColor(course.id, color.hex); setShowColorPicker(null); }}
+                                          className={`w-5 h-5 rounded-full transition-all hover:scale-110 ${getCourseColorClasses(color.hex).dot} ${courseColors[course.id] === color.hex ? 'ring-2 ring-white scale-110' : 'hover:ring-1 hover:ring-zinc-400'}`}
+                                          title={color.name}
+                                        />
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                            {syncedCourseList.length === 0 && (
+                              <p className="text-xs text-zinc-500 px-2 py-1">No synced courses</p>
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Filter Dropdown */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowFilterDropdown(!showFilterDropdown)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-colors ${showFilterDropdown ? "bg-zinc-700 text-white" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"}`}
+                    >
+                      <Filter size={16} />
+                      <span>Filter</span>
+                    </button>
+
+                    {showFilterDropdown && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setShowFilterDropdown(false)} />
+                        <div className="absolute right-0 top-full mt-1 w-44 bg-zinc-900 rounded-lg shadow-xl border border-zinc-800 z-50 py-1">
+                          <div className="px-3 py-1.5 border-b border-zinc-800 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                            Categories
+                          </div>
+                          {Object.keys(weeklyFilters).map(cat => (
+                            <button
+                              key={cat}
+                              onClick={() => toggleFilter(cat)}
+                              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 flex items-center justify-between"
+                            >
+                              <span>{cat}</span>
+                              {weeklyFilters[cat] && <CheckCircle2 size={12} className="text-blue-500" />}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <section className="flex-1 p-6 overflow-hidden flex gap-6">
+                <div className="flex-1 h-full flex flex-col">
+                  {/* Notebook Container */}
+                  <div className="flex-1 bg-[#09090b] rounded-md shadow-2xl overflow-hidden border border-zinc-800 relative">
+                    {/* Visual Binding Strip */}
+                    <div className="absolute left-0 top-0 bottom-0 w-12 border-r border-zinc-800 bg-zinc-950 z-10 hidden sm:block"></div>
+
+                    <div className="h-full overflow-y-auto pl-2 sm:pl-12 custom-scrollbar">
+                      {weekItems.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center h-full text-zinc-500 font-notebook text-xl"><p>Nothing due this week...</p></div>
+                      ) : (
+                        <div className="py-6 px-4 sm:px-8 space-y-8">
+                          {Object.entries(itemsByDay).map(([dayName, dayData]) => {
+                            if (dayData.items.length === 0) return null;
+                            const isToday = isSameDay(dayData.date, new Date());
+                            return (
+                              <div key={dayName} className="relative">
+                                <h3 className={`text-xl font-notebook mb-2 flex items-baseline gap-3 ${isToday ? 'text-blue-400' : 'text-zinc-500'}`}>
+                                  <span className="font-bold tracking-wide">{dayName}</span>
+                                  <span className="text-sm font-sans opacity-60">{dayData.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                                </h3>
+
+                                {/* Start of List */}
+                                <ul className="space-y-0">
+                                  {dayData.items.map((item) => {
+                                    const isCompleted = completedItems[item.id];
+
+                                    return (
+                                      <li key={item.id} className={`group relative flex items-start gap-3 py-3 border-b border-zinc-800/60 hover:bg-zinc-900/30 transition-all duration-300 ${isCompleted ? 'opacity-40' : ''}`}>
+                                        {/* Strikethrough line across entire row */}
+                                        {isCompleted && (
+                                          <div className="absolute left-0 right-0 top-1/2 h-[2px] bg-zinc-500/60 pointer-events-none z-10" />
+                                        )}
+                                        {/* Checkbox */}
+                                        <button
+                                          onClick={() => toggleComplete(item.id)}
+                                          className="mt-1 text-zinc-600 hover:text-green-500 transition-colors relative z-20"
+                                        >
+                                          {isCompleted ? <CheckCircle2 size={20} className="text-green-500" /> : <Circle size={20} />}
+                                        </button>
+
+                                        <div className="flex-1 flex items-center justify-between gap-4 font-notebook text-lg tracking-wide">
+                                          <div className={`flex items-baseline gap-2 ${isCompleted ? 'text-zinc-600' : 'text-zinc-200'}`}>
+                                            {/* Course Code Tag with color */}
+                                            <span
+                                              className={`px-1.5 py-0.5 rounded text-xs font-semibold uppercase tracking-wide ${getCourseColorClasses(courseColors[item.courseId]).tag}`}
+                                            >
+                                              {item.courseCode ? item.courseCode.toUpperCase() : "UNK"}
+                                            </span>
+                                            {/* Item Name */}
+                                            <span>{item.name}</span>
+                                          </div>
+
+                                          <div className="flex items-center gap-3 shrink-0">
+                                            {/* Due Time */}
+                                            <span className="text-sm text-zinc-500 font-sans">
+                                              {(() => {
+                                                const dt = parseDueToDate(item.due);
+                                                return dt
+                                                  ? dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+                                                  : "--";
+                                              })()}
+                                            </span>
+                                            {getCategoryBadge(item.category, "opacity-90 scale-90")}
+                                          </div>
+                                        </div>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                                {/* End of List - This was missing! */}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Re-implemented Progress Bar */}
+                <div
+                  ref={progressBarRef}
+                  className="w-16 sm:w-24 bg-zinc-950 rounded-lg shadow-lg border border-zinc-800 p-2 sm:p-4 shrink-0 flex flex-col items-center relative"
+                >
+                  <p className="text-[10px] sm:text-xs font-semibold text-zinc-500 uppercase tracking-widest mb-2 vertical-text sm:horizontal-text text-center">Progress</p>
+                  <div className="flex-1 w-2 sm:w-4 bg-zinc-900 rounded-full overflow-hidden p-0.5 flex flex-col-reverse gap-0.5">
+                    {Array.from({ length: 20 }).map((_, idx) => {
+                      const filledSegments = Math.round(progressPercent / 5);
+                      const filled = idx < filledSegments;
+                      return (
+                        <div
+                          key={idx}
+                          className={`w-full flex-1 rounded-sm transition-colors duration-300 ${filled ? (progressPercent === 100 ? 'bg-green-500' : 'bg-blue-600') : 'bg-transparent'}`}
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="mt-3 text-center"><p className={`text-lg sm:text-xl font-bold ${progressPercent === 100 ? 'text-green-500' : 'text-blue-500'}`}>{Math.round(progressPercent)}%</p></div>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {activeTab === "calendar" && (
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {/* Toolbar Strip with Navigation, Filter and Color Dropdowns */}
+              <div className="h-11 flex items-center justify-between px-6 border-b border-zinc-800 bg-zinc-900/50">
+                {/* Month Navigation */}
+                <div className="flex items-center gap-2">
+                  <button onClick={() => navigateMonth(-1)} className="p-1 hover:bg-zinc-800 rounded text-zinc-400"><ChevronLeft size={18} /></button>
+                  <span className="text-sm font-medium text-zinc-300 w-36 text-center">
+                    {currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+                  </span>
+                  <button onClick={() => navigateMonth(1)} className="p-1 hover:bg-zinc-800 rounded text-zinc-400"><ChevronRight size={18} /></button>
+                  <button onClick={() => setCurrentMonth(new Date())} className="ml-1 text-xs px-2 py-1 bg-blue-900/30 text-blue-300 border border-blue-900 rounded hover:bg-blue-900/50">Today</button>
+                </div>
+
+                {/* Color and Filter Controls */}
+                <div className="flex items-center gap-3">
+                  {/* Color Dropdown */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowColorDropdown(!showColorDropdown)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-colors ${showColorDropdown ? "bg-zinc-700 text-white" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"}`}
+                    >
+                      <Palette size={16} />
+                      <span>Colors</span>
+                    </button>
+
+                    {showColorDropdown && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => { setShowColorDropdown(false); setShowColorPicker(null); }} />
+                        <div className="absolute right-0 top-full mt-1 bg-zinc-900 rounded-lg shadow-xl border border-zinc-800 z-50 py-2 overflow-visible">
+                          <div className="px-3 py-1.5 border-b border-zinc-800 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">
+                            Course Colors
+                          </div>
+                          <div className="px-3 pb-2 space-y-1">
+                            {syncedCourseList.map(course => (
+                              <div key={course.id} className="relative">
+                                <button
+                                  onClick={() => setShowColorPicker(showColorPicker === course.id ? null : course.id)}
+                                  className={`w-full flex items-center justify-between gap-3 px-2 py-1.5 rounded transition-colors ${showColorPicker === course.id ? 'bg-zinc-700 ring-1 ring-zinc-500' : 'hover:bg-zinc-800'}`}
+                                >
+                                  <span className="text-xs text-zinc-300 truncate text-left" title={course.name}>
+                                    {course.name}
+                                  </span>
+                                  <div
+                                    className={`w-4 h-4 rounded-full shrink-0 ring-1 ring-zinc-600 ${getCourseColorClasses(courseColors[course.id]).dot}`}
+                                  />
+                                </button>
+                                {showColorPicker === course.id && (
+                                  <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 bg-zinc-800 rounded-lg shadow-xl border border-zinc-700 z-50 p-2">
+                                    <div className="grid grid-cols-3 gap-1.5 w-[72px]">
+                                      {COURSE_COLOR_PALETTE.map(color => (
+                                        <button
+                                          key={color.hex}
+                                          onClick={() => { setCourseColor(course.id, color.hex); setShowColorPicker(null); }}
+                                          className={`w-5 h-5 rounded-full transition-all hover:scale-110 ${getCourseColorClasses(color.hex).dot} ${courseColors[course.id] === color.hex ? 'ring-2 ring-white scale-110' : 'hover:ring-1 hover:ring-zinc-400'}`}
+                                          title={color.name}
+                                        />
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                            {syncedCourseList.length === 0 && (
+                              <p className="text-xs text-zinc-500 px-2 py-1">No synced courses</p>
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Filter Dropdown */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowFilterDropdown(!showFilterDropdown)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium transition-colors ${showFilterDropdown ? "bg-zinc-700 text-white" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"}`}
+                    >
+                      <Filter size={16} />
+                      <span>Filter</span>
+                    </button>
+
+                    {showFilterDropdown && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setShowFilterDropdown(false)} />
+                        <div className="absolute right-0 top-full mt-1 w-44 bg-zinc-900 rounded-lg shadow-xl border border-zinc-800 z-50 py-1">
+                          <div className="px-3 py-1.5 border-b border-zinc-800 text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                            Categories
+                          </div>
+                          {Object.keys(weeklyFilters).map(cat => (
+                            <button
+                              key={cat}
+                              onClick={() => toggleFilter(cat)}
+                              className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 flex items-center justify-between"
+                            >
+                              <span>{cat}</span>
+                              {weeklyFilters[cat] && <CheckCircle2 size={12} className="text-blue-500" />}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex-1 p-6 overflow-hidden flex flex-col min-h-0 relative">
+                {(() => {
+                  const { dates, rows } = getMonthDates(currentMonth);
+                  return (
+                    <>
+                      <div className={`grid grid-cols-7 rounded-lg overflow-hidden flex-1 min-h-0 gap-px bg-zinc-900 border border-zinc-900 ${getMonthGridRowsClass(rows)}`}>
+                        {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => (
+                          <div
+                            key={day}
+                            className="bg-zinc-950 py-2 text-center text-xs font-semibold text-zinc-500 uppercase tracking-wider shrink-0"
+                          >
+                            {day}
+                          </div>
+                        ))}
+
+                        {dates.map(({ date, isCurrentMonth }, idx) => {
+                          const items = getItemsForDate(date);
+                          const isToday = isSameDay(date, new Date());
+                          const isMutedMonth = !isCurrentMonth;
+                          const isSelected = zoomedDate && isSameDay(date, zoomedDate);
+
+                          return (
+                            <div
+                              key={idx}
+                              onClick={() => {
+                                if (isSelected) {
+                                  setZoomedDate(null);
+                                } else {
+                                  setZoomedDate(date);
+                                }
+                              }}
+                              className={`p-1.5 relative flex flex-col gap-0.5 transition-colors cursor-pointer overflow-hidden ${isSelected
+                                ? 'bg-blue-950/30 ring-1 ring-blue-500/50 ring-inset z-10'
+                                : isMutedMonth
+                                  ? 'bg-zinc-950 hover:bg-zinc-900'
+                                  : 'bg-black hover:bg-zinc-900'
+                                }`}
+                            >
+                              <span className={`text-xs font-medium w-5 h-5 flex items-center justify-center rounded-full shrink-0 ${isToday
+                                ? 'bg-blue-600 text-white'
+                                : isMutedMonth
+                                  ? 'text-zinc-600'
+                                  : 'text-zinc-500'
+                                }`}>
+                                {date.getDate()}
+                              </span>
+
+                              <div className="flex-1 min-h-0 overflow-y-auto space-y-1 custom-scrollbar">
+                                {items.length > 0 ? (
+                                  items.slice(0, 4).map((item, itemIdx) => (
+                                    <div
+                                      key={itemIdx}
+                                      className={`px-1.5 py-1 rounded text-[10px] leading-tight truncate border border-transparent border-l-4 hover:border-zinc-700 bg-zinc-800 text-zinc-200 flex items-center gap-1 ${getCourseColorClasses(courseColors[item.courseId]).accent}`}
+                                      title={item.name}
+                                    >
+                                      <span className="font-bold opacity-75">{item.courseCode}</span>
+                                      <span className="truncate">{item.name}</span>
+                                    </div>
+                                  ))
+                                ) : null}
+                                {items.length > 4 && (
+                                  <div className={`text-[10px] pl-1 ${isMutedMonth ? 'text-zinc-600' : 'text-zinc-500'}`}>
+                                    + {items.length - 4} more
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Floating Expanded Cell */}
+                      {zoomedDate && (() => {
+                        return (
+                          <>
+                            <div className="fixed inset-0 z-40 bg-black/30" onClick={() => setZoomedDate(null)} />
+                            <div className="fixed inset-0 z-50 flex items-center justify-center p-3 pointer-events-none">
+                              <div
+                                className="pointer-events-auto bg-zinc-900 rounded-lg border border-zinc-700 shadow-2xl p-3 w-[250px] max-h-[320px] flex flex-col"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                {/* Header */}
+                                <div className="flex items-center justify-between mb-2 pb-2 border-b border-zinc-800">
+                                  <div className="flex items-center gap-2">
+                                    <span className={`text-sm font-semibold w-7 h-7 flex items-center justify-center rounded-full ${isSameDay(zoomedDate, new Date()) ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-300'}`}>
+                                      {zoomedDate.getDate()}
+                                    </span>
+                                    <span className="text-xs text-zinc-400">
+                                      {zoomedDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short' })}
+                                    </span>
+                                  </div>
+                                  <button
+                                    onClick={() => setZoomedDate(null)}
+                                    className="p-1 text-zinc-500 hover:text-white rounded hover:bg-zinc-800 transition-colors"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+
+                                {/* Items - same style as calendar cells */}
+                                <div className="flex-1 overflow-y-auto space-y-1.5 custom-scrollbar">
+                                  {getItemsForDate(zoomedDate).length === 0 ? (
+                                    <p className="text-center text-zinc-500 py-4 text-xs">No events</p>
+                                  ) : (
+                                    getItemsForDate(zoomedDate).map((item, itemIdx) => (
+                                      <div
+                                        key={itemIdx}
+                                        className={`px-2 py-1.5 rounded text-xs leading-tight border border-transparent border-l-4 hover:border-zinc-600 bg-zinc-800 text-zinc-200 flex items-center gap-1.5 ${getCourseColorClasses(courseColors[item.courseId]).accent}`}
+                                      >
+                                        <span className="font-bold opacity-75 shrink-0">{item.courseCode}</span>
+                                        <span className="truncate flex-1">{item.name}</span>
+                                        <span className="text-[10px] text-zinc-500 shrink-0">
+                                          {(() => {
+                                            const dt = parseDueToDate(item.due);
+                                            return dt ? dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : "";
+                                          })()}
+                                        </span>
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        );
+                      })()}
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
+          {activeTab === "course" && (
+            /* Course View */
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <header className="h-14 flex items-center justify-between px-6 border-b border-zinc-800 bg-zinc-950">
+                <h1 className="text-lg font-semibold text-white">
+                  {selectedCourse ? selectedCourse.name : "Select a course"}
+                </h1>
+              </header>
+
+              <section className="flex-1 p-6 overflow-y-auto">
+                {currentSyncStatus && (
+                  <div
+                    className={`mb-4 p-3 rounded-lg text-sm font-medium ${String(currentSyncStatus).toLowerCase().includes("complete")
+                      ? "bg-green-950 text-green-300 border border-green-900"
+                      : String(currentSyncStatus).toLowerCase().includes("fail")
+                        ? "bg-red-950 text-red-300 border border-red-900"
+                        : "bg-blue-950 text-blue-300 border border-blue-900"
+                      }`}
+                  >
+                    {currentSyncStatus}
+                  </div>
+                )}
+
+                <div className="bg-zinc-950 rounded-lg shadow-lg border border-zinc-800 p-5">
+                  {selectedCourse?.status === "NOT_SYNCED" ? (
+                    <div className="text-center py-8">
+                      <p className="text-zinc-400 mb-4">
+                        Click "Sync Course" to analyze this course
+                      </p>
+                      <button
+                        onClick={() => syncCourse(selectedCourseId)}
+                        disabled={isSyncing}
+                        className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-zinc-800 font-medium"
+                      >
+                        {isSyncing ? "Syncing..." : "Sync Course"}
+                      </button>
+                    </div>
+                  ) : courseItems.length === 0 ? (
+                    <p className="text-sm text-zinc-500 text-center py-8">
+                      No course items synced yet. Click "Sync Course" to load assignments + readings.
+                    </p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-zinc-800 bg-black">
+                          <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Item</th>
+                          <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Category</th>
+                          <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Due Date</th>
+                          <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Status</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {sortedCourseItems.map((a, idx) => {
+                          return (
+                            <tr key={`${a.name}-${idx}`} className="border-b border-zinc-800 hover:bg-black transition-colors">
+                              <td className="py-2 px-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-white">{a.name}</span>
+                                  {getStatusBadge(a.status)}
+                                </div>
+                              </td>
+
+                              <td className="py-2 px-2">
+                                {getCategoryBadge(a.category)}
+                              </td>
+
+                              <td
+                                className={`py-2 px-2 ${a.status === "CONFLICT" ? "text-red-400 font-medium" : "text-zinc-400"
+                                  }`}
+                              >
+                                {a.due ? (
+                                  a.status === "RESOLVED"
+                                    ? formatDueInCourseTZ(a.due)
+                                    : formatDateOnly(a.due)
+                                ) : (
+                                  <span className="opacity-30">--</span>
+                                )}
+                              </td>
+
+                              <td className="py-2 px-2 text-xs text-zinc-500">
+                                {a.status || "OK"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </section>
+            </div>
+          )}
+
+        </main>
+      </div>
+
+
+    </div>
+  );
+}
+
+export default App;

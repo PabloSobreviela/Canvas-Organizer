@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "canvas-organizer-4437b"
+  },
+  "targets": {
+    "canvas-organizer-4437b": {
+      "hosting": {
+        "app": [
+          "canvas-organizer-4437b"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
