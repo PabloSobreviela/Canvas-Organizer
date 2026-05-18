@@ -170,7 +170,7 @@ def consume_hourly_rate_limit(user_id: str, limit_key: str, limit_per_hour: int)
         .select("id, count")
         .eq("user_id", user_id)
         .eq("limit_key", limit_key)
-        .eq("window", window_iso)
+        .eq("time_window", window_iso)
         .eq("bucket_id", bucket_id)
         .limit(1)
         .execute()
@@ -207,7 +207,7 @@ def consume_hourly_rate_limit(user_id: str, limit_key: str, limit_per_hour: int)
         db.table("rate_limits").insert({
             "user_id": user_id,
             "limit_key": limit_key,
-            "window": window_iso,
+            "time_window": window_iso,
             "bucket_id": bucket_id,
             "count": next_count,
             "limit_value": limit_per_hour,

@@ -156,13 +156,13 @@ CREATE TABLE IF NOT EXISTS rate_limits (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id TEXT NOT NULL,
     limit_key TEXT NOT NULL,
-    window TEXT DEFAULT 'hour',
+    time_window TEXT DEFAULT 'hour',
     bucket_id TEXT NOT NULL,
     count INT DEFAULT 0,
     limit_value INT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(user_id, limit_key, window, bucket_id)
+    UNIQUE(user_id, limit_key, time_window, bucket_id)
 );
 
 -- Enable Row Level Security on all tables
