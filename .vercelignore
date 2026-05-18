@@ -1,0 +1,11 @@
+backend/
+data/
+.git/
+.venv/
+*.pyc
+__pycache__/
+node_modules/
+.firebase/
+*.lnk
+*.bak
+*.db
