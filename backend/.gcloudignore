@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+.env
+.env.*
+data/
+*.log
+LEGACY_*
+firebase_key.json
+Amazon secret access key.txt
+*secret*key*
+# Keep requirements.txt (don't exclude *.txt)

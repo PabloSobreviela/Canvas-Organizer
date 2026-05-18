@@ -1,0 +1,49 @@
+# Backend credentials and secrets
+backend/firebase_key.json
+backend/firebase-key.json
+backend/.env
+backend/.env.*
+!backend/.env.template
+backend/Amazon secret access key.txt
+backend/*secret*key*
+backend/*.pem
+backend/*-key.json
+*.key.json
+
+# Frontend env files (never commit real config)
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production
+frontend/.env.production.local
+!frontend/.env.template
+
+.gcloud-tmp/
+.gcloud-config/
+
+# Local user data and cached course materials (PDFs, extracted text)
+backend/data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Dependencies
+node_modules/
+backend/venv/
+.venv/
+
+# Build output
+frontend/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

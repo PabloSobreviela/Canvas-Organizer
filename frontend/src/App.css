@@ -1,0 +1,51 @@
+import SummaryCard from "./components/SummaryCard";
+import FileUploadForm from "./components/FileUploadForm";
+
+export default function App() {
+  const [assignments, setAssignments] = useState([]);
+  const [announcements, setAnnouncements] = useState([]);
+  const [showAssignments, setShowAssignments] = useState(false);
+  const [showAnnouncements, setShowAnnouncements] = useState(false);
+
+  const handleCalendar = async (url) => {
+    const res = await axios.post("http://localhost:5000/api/calendar", { url });
+    setAssignments(res.data);
+    setShowAssignments(false);
+  };
+
+  const handleRSS = async (url) => {
+    const res = await axios.post("http://localhost:5000/api/rss", { url });
+    setAnnouncements(res.data);
+    setShowAnnouncements(false);
+  };
+
+  return (
+    <div className="p-6 space-y-6">
+      <h1 className="text-4xl font-bold">CanvasSync</h1>
+
+      <UploadForm onCalendarSubmit={handleCalendar} onRSSSubmit={handleRSS} />
+      <FileUploadForm />
+
+      {/* Summary cards */}
+      <SummaryCard
+        title="Assignments"
+        count={assignments.length}
+        onView={() => setShowAssignments(true)}
+      />
+
+      <SummaryCard
+        title="Announcements"
+        count={announcements.length}
+        onView={() => setShowAnnouncements(true)}
+      />
+
+      {showAssignments && (
+        <AssignmentList assignments={assignments} />
+      )}
+
+      {showAnnouncements && (
+        <Announcements announcements={announcements} />
+      )}
+    </div>
+  );
+}

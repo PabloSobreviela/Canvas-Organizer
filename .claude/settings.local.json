@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"c:\\\\Users\\\\pablo\\\\Downloads\\\\canvas-organizer\" -name \"firebase_key.json\" -o -name \".env*\" 2>nul | head -20)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\pablo\\Downloads\\canvas-organizer"
+    ]
+  }
+}
