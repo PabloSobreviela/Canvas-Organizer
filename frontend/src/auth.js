@@ -143,6 +143,13 @@ export async function getAuthToken() {
   return getStoredToken();
 }
 
+/** Store a demo session JWT issued by /api/demo/session */
+export function storeDemoSession(token, user) {
+  _storeSession(token, user);
+  _currentUser = user;
+  _notifyAuthChange(_currentUser);
+}
+
 export function isAuthenticated() {
   return !!getStoredToken();
 }
