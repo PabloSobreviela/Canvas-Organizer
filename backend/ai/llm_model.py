@@ -82,6 +82,7 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
         max_tokens=4096,
         temperature=0.2,
         top_p=0.95,
+        extra_body={"thinking": {"type": "disabled"}},
     )
 
     try:

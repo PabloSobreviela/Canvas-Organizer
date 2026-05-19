@@ -3098,10 +3098,7 @@ function App() {
                         onClick={handleCanvasSignIn}
                         className="inline-flex items-center justify-center gap-3 bg-white text-black px-6 py-3 rounded-md font-medium hover:bg-zinc-100 transition"
                       >
-                        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                          <circle cx="12" cy="12" r="11" fill="#E74C3C"/>
-                          <text x="12" y="16" textAnchor="middle" fill="white" fontSize="12" fontWeight="bold">C</text>
-                        </svg>
+                        <img src="/canvas-logo.png" width="20" height="20" alt="" aria-hidden="true" />
                         Sign in with Canvas
                       </button>
                       <span className="inline-flex items-center text-sm text-zinc-400">
