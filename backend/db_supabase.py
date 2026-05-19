@@ -254,13 +254,40 @@ def create_user(user_id: str, email: str, display_name: str = None) -> str:
 
 
 def get_user(user_id: str) -> Optional[Dict]:
-    """Get user by id (UUID string)."""
+    """Get user by primary id or canvas_user_id."""
     db = get_db()
     resp = db.table("users").select("*").eq("id", user_id).limit(1).execute()
     if resp.data:
         row = resp.data[0]
         return _user_row_to_dict(row)
+    resp = db.table("users").select("*").eq("canvas_user_id", user_id).limit(1).execute()
+    if resp.data:
+        row = resp.data[0]
+        return _user_row_to_dict(row)
     return None
+
+
+def upsert_user_with_id(user_id: str, email: str, display_name: str = None) -> str:
+    """Upsert a user row using a fixed UUID primary key (demo accounts)."""
+    db = get_db()
+    now_ts = now_iso()
+    db.table("users").upsert(
+        {
+            "id": user_id,
+            "canvas_user_id": user_id,
+            "email": email,
+            "display_name": display_name,
+            "course_colors": {},
+            "starred_courses": {},
+            "sync_enabled_courses": {},
+            "completed_items": {},
+            "created_at": now_ts,
+            "last_login": now_ts,
+            "updated_at": now_ts,
+        },
+        on_conflict="id",
+    ).execute()
+    return user_id
 
 
 def _user_row_to_dict(row: Dict) -> Dict:
@@ -379,12 +406,13 @@ def get_user_canvas_credentials(user_id: str) -> Optional[Dict]:
 def save_course(user_id: str, course_data: Dict, canvas_credential_key: str = None) -> str:
     """Save/upsert a course row. Returns the row id."""
     db = get_db()
-    canvas_course_id = str(course_data.get("canvasCourseId") or course_data.get("id") or "")
-    canvas_course_id_int = int(canvas_course_id) if canvas_course_id.isdigit() else None
+    canvas_course_id = str(course_data.get("canvasCourseId") or course_data.get("id") or "").strip()
+    if not canvas_course_id:
+        raise ValueError("course_data must include id or canvasCourseId")
 
     payload = {
         "user_id": user_id,
-        "canvas_course_id": canvas_course_id_int,
+        "canvas_course_id": canvas_course_id,
         "canvas_course_id_str": canvas_course_id,
         "course_name": course_data.get("name"),
         "course_code": course_data.get("course_code"),

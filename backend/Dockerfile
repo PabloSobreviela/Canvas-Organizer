@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
 # Copy only runtime application code (avoid copying secrets or local artifacts)
 COPY app.py ./
 COPY auth.py ./
+COPY demo_service.py ./
 COPY db_supabase.py ./
 COPY db.py ./
 COPY storage.py ./
@@ -30,6 +31,7 @@ COPY cloud_cost_audit.py ./
 COPY timezone_utils.py ./
 COPY ai ./ai
 COPY parsers ./parsers
+COPY demo_files ./demo_files
 
 # Create data directory for local storage fallback
 RUN mkdir -p data/storage

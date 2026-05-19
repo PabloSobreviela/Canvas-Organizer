@@ -1460,6 +1460,69 @@ def health_check():
     })
 
 
+# =============================================================================
+# DEMO MODE (syllabus PDFs + mock Canvas assignments, real AI resolve)
+# =============================================================================
+
+try:
+    from demo_service import (
+        DEMO_USER_ID,
+        DEMO_CREDENTIAL_KEY,
+        is_demo_user,
+        get_demo_courses_payload,
+        sync_demo_course_materials,
+        sync_demo_assignments,
+    )
+except ImportError:
+    DEMO_USER_ID = "a0000000-0000-4000-8000-000000000001"
+    DEMO_CREDENTIAL_KEY = "demo"
+
+    def is_demo_user(user_id):
+        return False
+
+    def get_demo_courses_payload():
+        return []
+
+    def sync_demo_course_materials(*_args, **_kwargs):
+        raise RuntimeError("Demo service unavailable")
+
+    def sync_demo_assignments(*_args, **_kwargs):
+        raise RuntimeError("Demo service unavailable")
+
+
+if USE_FIRESTORE:
+    @app.route("/api/demo/session", methods=["POST"])
+    @limiter.limit("30/minute")
+    def demo_session():
+        """Issue a demo JWT and course list (no Canvas OAuth required)."""
+        from auth import create_demo_token
+        from db_supabase import upsert_user_with_id
+
+        token = create_demo_token(
+            user_id=DEMO_USER_ID,
+            email="demo@canvassync.dev",
+            name="Demo User",
+        )
+        if not token:
+            return jsonify({"error": "Demo mode is not configured on the server."}), 503
+
+        try:
+            upsert_user_with_id(DEMO_USER_ID, "demo@canvassync.dev", "Demo User")
+        except Exception as exc:
+            logger.warning("Demo user upsert failed: %s", exc)
+
+        return jsonify({
+            "token": token,
+            "user": {
+                "uid": DEMO_USER_ID,
+                "email": "demo@canvassync.dev",
+                "displayName": "Demo User",
+            },
+            "courses": get_demo_courses_payload(),
+            "canvas_base_url": "https://gatech.instructure.com",
+        })
+
+
 # Canvas OAuth2 routes (only in cloud mode)
 if USE_FIRESTORE:
     from auth import canvas_oauth_login, canvas_oauth_callback, canvas_oauth_logout
@@ -2297,6 +2360,25 @@ def sync_assignments():
     course_id = str(payload.get("course_id") or "").strip()
     user_id = request.user_id
 
+    if USE_FIRESTORE and is_demo_user(user_id, getattr(request, "is_demo", False)):
+        if not course_id:
+            return jsonify({"error": "Missing course_id"}), 400
+        try:
+            summary = sync_demo_assignments(
+                user_id,
+                course_id,
+                now_iso=now_iso,
+                save_assignment=save_assignment,
+                get_course_assignments=get_course_assignments,
+                delete_discovered_assignments=delete_discovered_assignments,
+            )
+            return jsonify(summary)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("Demo assignment sync failed: %s", exc)
+            return jsonify({"error": "Demo assignment sync failed"}), 500
+
     base_url, token, error = resolve_canvas_credentials(user_id, payload)
     if error:
         return jsonify({"error": error}), 400
@@ -2632,6 +2714,30 @@ def sync_course_materials():
     payload = request.get_json(silent=True) or {}
     course_id = str(payload.get("course_id") or "").strip()
     user_id = request.user_id
+
+    if USE_FIRESTORE and is_demo_user(user_id, getattr(request, "is_demo", False)):
+        if not course_id:
+            return jsonify({"error": "Missing course_id"}), 400
+        try:
+            summary = sync_demo_course_materials(
+                user_id,
+                course_id,
+                now_iso=now_iso,
+                save_course=save_course,
+                save_course_file_text_versioned=save_course_file_text_versioned,
+                archive_course_file_texts=archive_course_file_texts,
+                get_course_sync_version=get_course_sync_version,
+                increment_course_sync_version=increment_course_sync_version,
+                cleanup_old_file_versions=cleanup_old_file_versions,
+            )
+            return jsonify(summary)
+        except FileNotFoundError as exc:
+            return jsonify({"error": str(exc)}), 500
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("Demo materials sync failed: %s", exc)
+            return jsonify({"error": "Demo materials sync failed"}), 500
 
     base_url, token, error = resolve_canvas_credentials(user_id, payload)
     if error:
@@ -3243,8 +3349,11 @@ def resolve_course_dates():
 
     active_credential_key = None
     if USE_FIRESTORE:
-        creds = get_user_canvas_credentials(user_id)
-        active_credential_key = creds.get('canvas_credential_key') if creds else None
+        if is_demo_user(user_id, getattr(request, "is_demo", False)):
+            active_credential_key = DEMO_CREDENTIAL_KEY
+        else:
+            creds = get_user_canvas_credentials(user_id)
+            active_credential_key = creds.get('canvas_credential_key') if creds else None
 
     grouped_course_ids = [course_id]
     canvas_course_lookup = {}

@@ -127,7 +127,12 @@ def _set_cached_user_info(token: str, user_info: dict, exp_timestamp: float = No
 # JWT helpers
 # ---------------------------------------------------------------------------
 
-def _issue_session_jwt(user_id: str, email: str = None, name: str = None) -> str:
+def _issue_session_jwt(
+    user_id: str,
+    email: str = None,
+    name: str = None,
+    extra_claims: dict | None = None,
+) -> str:
     """Issue a signed JWT session token."""
     now = datetime.now(timezone.utc)
     payload = {
@@ -138,6 +143,8 @@ def _issue_session_jwt(user_id: str, email: str = None, name: str = None) -> str
         "iat": now,
         "exp": now + timedelta(hours=SESSION_TOKEN_EXPIRY_HOURS),
     }
+    if extra_claims:
+        payload.update(extra_claims)
     return jwt.encode(payload, SESSION_SECRET_KEY, algorithm="HS256")
 
 
@@ -194,6 +201,7 @@ def get_user_from_token(id_token: str) -> dict | None:
         "uid": payload["sub"],
         "email": payload.get("email"),
         "name": payload.get("name"),
+        "demo": bool(payload.get("demo")),
     }
     exp_ts = payload.get("exp")
     if isinstance(exp_ts, (int, float)):
@@ -228,6 +236,8 @@ def ensure_user_exists(user_id: str, email: str, display_name: str = None):
                     return user_id
 
     existing_user = get_user(user_id)
+    if existing_user:
+        user_id = str(existing_user.get("id") or user_id)
 
     if existing_user:
         should_update_last_login = True
@@ -248,7 +258,8 @@ def ensure_user_exists(user_id: str, email: str, display_name: str = None):
                     "last_login_updated_at": last_login_updated_at,
                 }
     else:
-        create_user(user_id, email, display_name)
+        row_id = create_user(user_id, email, display_name)
+        user_id = str(row_id or user_id)
         if AUTH_USER_SYNC_CACHE_SECONDS > 0:
             with _AUTH_CACHE_LOCK:
                 _USER_SYNC_CACHE[user_id] = {
@@ -322,6 +333,7 @@ def require_auth(f):
         request.user_id = user_id
         request.user_email = user_info.get("email")
         request.user_name = user_info.get("name")
+        request.is_demo = bool(user_info.get("demo"))
 
         return f(*args, **kwargs)
 
@@ -516,11 +528,24 @@ def create_dev_token(user_id: str = "dev-user-001", email: str = "dev@localhost"
         return None
     try:
         ensure_user_exists(user_id, email, name)
-        return _issue_session_jwt(user_id, email, name)
     except Exception as e:
-        if AUTH_DEBUG:
-            logger.debug("Failed to create dev token: %s", e)
+        logger.warning("Dev token user sync skipped for %s: %s", user_id, e)
+    return _issue_session_jwt(user_id, email, name)
+
+
+def create_demo_token(
+    user_id: str = "a0000000-0000-4000-8000-000000000001",
+    email: str = "demo@canvassync.dev",
+    name: str = "Demo User",
+) -> str | None:
+    """Issue a demo session JWT (Supabase user sync is best-effort)."""
+    if not SESSION_SECRET_KEY:
         return None
+    try:
+        ensure_user_exists(user_id, email, name)
+    except Exception as e:
+        logger.warning("Demo token user sync skipped for %s: %s", user_id, e)
+    return _issue_session_jwt(user_id, email, name, extra_claims={"demo": True})
 
 
 # ---------------------------------------------------------------------------
