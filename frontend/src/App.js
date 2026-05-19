@@ -15,12 +15,15 @@ const API_BASE = (() => {
 })();
 const COURSE_TIMEZONE = "America/New_York";
 
-function BrandWordmark({ className = "", syncClassName = "text-white" }) {
+function BrandWordmark({ className = "", height = 22 }) {
   return (
-    <span className={`inline-flex items-baseline font-semibold tracking-tight ${className}`.trim()}>
-      <span className="text-sky-400">Canvas</span>
-      <span className={syncClassName}>Sync</span>
-    </span>
+    <img
+      src="/canvassync-wordmark.png"
+      alt="CanvasSync"
+      height={height}
+      style={{ height: `${height}px`, width: "auto" }}
+      className={className}
+    />
   );
 }
 
@@ -1326,8 +1329,49 @@ function App() {
     }
   }, []);
 
+  // Demo mode: /demo URL bypasses auth with sample data for UI/UX development
+  const isDemoMode = window.location.pathname === "/demo";
+  useEffect(() => {
+    if (!isDemoMode) return;
+    const demoUser = { uid: "demo-user", email: "demo@canvassync.dev", displayName: "Demo User" };
+    setFirebaseUser(demoUser);
+    setAuthLoading(false);
+    setCanvasBaseUrl("https://gatech.instructure.com");
+    setCanvasStatus("connected");
+
+    const demoCourses = [
+      { id: "math2552", name: "Differential Equations (MATH 2552)", courseCode: "MATH 2552", status: "SYNCED", isCurrentlyActive: true },
+      { id: "cs1332", name: "Data Structures & Algorithms (CS 1332)", courseCode: "CS 1332", status: "SYNCED", isCurrentlyActive: true },
+    ];
+    setActiveCourses(demoCourses);
+
+    const now = new Date();
+    const mon = new Date(now); mon.setDate(now.getDate() - now.getDay() + 1);
+    const d = (offset, h = 23, m = 59) => { const t = new Date(mon); t.setDate(t.getDate() + offset); t.setHours(h, m, 0, 0); return t.toISOString(); };
+
+    const demoItems = {
+      math2552: [
+        { id: "m-hw5", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Homework 5 (Sections 3.1-3.3)", due: d(0), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "hw5" },
+        { id: "m-hw6", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Homework 6 (Sections 3.4-3.6)", due: d(7), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "hw6" },
+        { id: "m-quiz3", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Quiz 3 — Laplace Transforms", due: d(2, 14, 0), status: "OK", category: "EXAM", canvasAssignmentId: null, discoveredKey: "quiz3" },
+        { id: "m-midterm2", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Midterm 2", due: d(9, 14, 0), status: "OK", category: "EXAM", canvasAssignmentId: null, discoveredKey: "midterm2" },
+        { id: "m-reading", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Read Ch. 4 (Systems of ODEs)", due: d(3), status: "OK", category: "READING", canvasAssignmentId: null, discoveredKey: "read-ch4" },
+      ],
+      cs1332: [
+        { id: "c-hw7", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "HW 7 — AVL Trees", due: d(1), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "hw7" },
+        { id: "c-hw8", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "HW 8 — Hash Maps", due: d(8), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "hw8" },
+        { id: "c-exam2", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "Exam 2 — Trees & Heaps", due: d(4, 18, 0), status: "OK", category: "EXAM", canvasAssignmentId: null, discoveredKey: "exam2" },
+        { id: "c-recitation", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "Recitation Worksheet 8", due: d(2), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "rec8" },
+        { id: "c-reading", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "Reading: Sorting Algorithms Ch. 12", due: d(5), status: "OK", category: "READING", canvasAssignmentId: null, discoveredKey: "read-sort" },
+      ],
+    };
+    setItemsByCourse(demoItems);
+    setCompletedItems({ "m-hw5": true, "c-hw7": true });
+  }, [isDemoMode]);
+
   // Listen to Firebase auth state changes
   useEffect(() => {
+    if (isDemoMode) return;
     // Initialize Canvas OAuth auth (check for callback tokens in URL, restore session)
     initAuth();
 
@@ -3028,10 +3072,10 @@ function App() {
           <header className="h-12 flex items-center justify-between px-5 bg-zinc-950 border-b border-zinc-800 shrink-0">
             {firebaseUser ? (
               <button onClick={() => setShowLandingPage(false)} aria-label="Return to app">
-                <BrandWordmark className="text-lg" syncClassName="text-zinc-100" />
+                <BrandWordmark height={20} />
               </button>
             ) : (
-              <BrandWordmark className="text-lg" syncClassName="text-zinc-100" />
+              <BrandWordmark height={20} />
             )}
             {firebaseUser ? (
               <button
@@ -3078,6 +3122,12 @@ function App() {
                       Sign in with Canvas
                     </button>
                   )}
+                  <a
+                    href="/demo"
+                    className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium border border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-white transition-colors"
+                  >
+                    Try Demo
+                  </a>
                 </div>
 
                 <div className="mt-9 space-y-2.5 text-sm">
@@ -3552,7 +3602,7 @@ function App() {
               aria-label="Open CanvasSync landing page"
               title="Open landing page"
             >
-              <BrandWordmark className="text-[1.45rem]" syncClassName="text-zinc-100" />
+              <BrandWordmark height={24} />
             </button>
           </div>
           <div className="justify-self-center">
