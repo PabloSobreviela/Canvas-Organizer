@@ -28,20 +28,11 @@
   margin-bottom: 24px;
 }
 
-.logo-wordmark {
-  display: inline-flex;
-  align-items: baseline;
-  font-size: 52px;
-  font-weight: 800;
-  letter-spacing: -1px;
-}
-
-.logo-wordmark-canvas {
-  color: #38bdf8;
-}
-
-.logo-wordmark-sync {
-  color: #1a1a2e;
+.login-wordmark-img {
+  height: 156px;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
 }
 
 @keyframes bounce {
@@ -172,7 +163,7 @@
     font-size: 28px;
   }
   
-  .logo-wordmark {
-    font-size: 42px;
+  .login-wordmark-img {
+    height: 126px;
   }
 }

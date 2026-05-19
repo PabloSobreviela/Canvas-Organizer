@@ -55,10 +55,11 @@ function Login() {
                 <div className="login-card">
                     {/* Brand */}
                     <div className="login-logo">
-                        <span className="logo-wordmark">
-                            <span className="logo-wordmark-canvas">Canvas</span>
-                            <span className="logo-wordmark-sync">Sync</span>
-                        </span>
+                        <img
+                            src="/canvassync-wordmark.png"
+                            alt="CanvasSync"
+                            className="login-wordmark-img"
+                        />
                     </div>
 
                     {/* Title */}

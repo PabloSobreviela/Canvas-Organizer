@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ChevronLeft, ChevronRight, Calendar, List, CheckCircle2, Circle, User, X, Menu, Filter, Palette, Settings2 } from "lucide-react";
-import { signInWithCanvas, logout, onAuthChange, getAuthToken, initAuth } from './auth';
+import { signInWithCanvas, logout, onAuthChange, getAuthToken, initAuth, storeDemoSession } from './auth';
 // Legacy firebase.js kept as reference; all auth now uses auth.js (Canvas OAuth)
 import { sileo, Toaster } from "sileo";
 import "sileo/styles.css";
@@ -15,13 +15,13 @@ const API_BASE = (() => {
 })();
 const COURSE_TIMEZONE = "America/New_York";
 
-function BrandWordmark({ className = "", height = 22, invert = false }) {
+function BrandWordmark({ className = "", height = 66 }) {
   return (
     <img
       src="/canvassync-wordmark.png"
       alt="CanvasSync"
       height={height}
-      style={{ height: `${height}px`, width: "auto", ...(invert ? { filter: "brightness(0) invert(1)" } : {}) }}
+      style={{ height: `${height}px`, width: "auto" }}
       className={className}
     />
   );
@@ -3069,13 +3069,13 @@ function App() {
         />
         <div className="h-screen flex flex-col bg-black text-white" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
           {/* Top bar — mirrors the authenticated app header */}
-          <header className="h-12 flex items-center justify-between px-5 bg-zinc-950 border-b border-zinc-800 shrink-0">
+          <header className="min-h-16 flex items-center justify-between px-5 py-2 bg-zinc-950 border-b border-zinc-800 shrink-0">
             {firebaseUser ? (
               <button onClick={() => setShowLandingPage(false)} aria-label="Return to app">
-                <BrandWordmark height={20} invert />
+                <BrandWordmark height={60} />
               </button>
             ) : (
-              <BrandWordmark height={20} invert />
+              <BrandWordmark height={60} />
             )}
             {firebaseUser ? (
               <button
@@ -3602,7 +3602,7 @@ function App() {
               aria-label="Open CanvasSync landing page"
               title="Open landing page"
             >
-              <BrandWordmark height={24} invert />
+              <BrandWordmark height={72} />
             </button>
           </div>
           <div className="justify-self-center">
