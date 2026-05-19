@@ -47,8 +47,7 @@ function LandingDemoSquare() {
 
   return (
     <section className="relative">
-      <div className="absolute -inset-10 bg-blue-600/10 blur-3xl rounded-full pointer-events-none" />
-      <div className="relative border border-zinc-800 rounded-xl bg-zinc-950/80 backdrop-blur p-5 shadow-2xl">
+      <div className="border border-zinc-800 rounded-md bg-zinc-950 p-5">
         <div className="flex items-center justify-between pb-4 border-b border-zinc-800">
           <p className="text-sm text-zinc-400">This Week (All Sources)</p>
           <p className="text-xs px-2 py-1 rounded bg-blue-900/40 text-blue-300 border border-blue-900">Synced</p>
@@ -3020,107 +3019,81 @@ function App() {
     return (
       <>
         <Toaster
-          position="top-center"
+          position="top-right"
           offset={16}
           options={{ fill: "#0b1020", roundness: 12, duration: 2600 }}
         />
-        <div className="min-h-screen bg-[#06080c] text-white">
-          <style>{`
-          @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap');
-          .landing-font { font-family: 'Space Grotesk', sans-serif; }
-          .landing-grid {
-            background-image:
-              linear-gradient(to right, rgba(255,255,255,0.04) 1px, transparent 1px),
-              linear-gradient(to bottom, rgba(255,255,255,0.04) 1px, transparent 1px);
-            background-size: 46px 46px;
-          }
-        `}</style>
+        <div className="h-screen flex flex-col bg-black text-white" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
+          {/* Top bar — mirrors the authenticated app header */}
+          <header className="h-12 flex items-center justify-between px-5 bg-zinc-950 border-b border-zinc-800 shrink-0">
+            {firebaseUser ? (
+              <button onClick={() => setShowLandingPage(false)} aria-label="Return to app">
+                <BrandWordmark className="text-lg" syncClassName="text-zinc-100" />
+              </button>
+            ) : (
+              <BrandWordmark className="text-lg" syncClassName="text-zinc-100" />
+            )}
+            {firebaseUser ? (
+              <button
+                onClick={() => setShowLandingPage(false)}
+                className="text-sm px-3 py-1.5 rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+              >
+                Back to App
+              </button>
+            ) : (
+              <button
+                onClick={handleCanvasSignIn}
+                className="text-sm px-3 py-1.5 rounded-md border border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-white transition-colors"
+              >
+                Sign in
+              </button>
+            )}
+          </header>
 
-          <div className="landing-font min-h-screen landing-grid">
-            <header className="max-w-6xl mx-auto px-6 pt-8 pb-4 flex items-center justify-between">
-              {firebaseUser ? (
-                <button
-                  onClick={() => setShowLandingPage(false)}
-                  className="flex items-center"
-                  aria-label="Return to app"
-                  title="Return to app"
-                >
-                  <BrandWordmark className="text-[1.75rem]" />
-                </button>
-              ) : (
-                <div className="flex items-center" aria-label="CanvasSync logo">
-                  <BrandWordmark className="text-[1.75rem]" />
-                </div>
-              )}
-              {firebaseUser ? (
-                <button
-                  onClick={() => setShowLandingPage(false)}
-                  className="text-sm px-4 py-2 rounded-md border border-zinc-700 text-zinc-200 hover:border-zinc-500 hover:text-white transition-colors"
-                >
-                  Back to App
-                </button>
-              ) : (
-                <button
-                  onClick={handleCanvasSignIn}
-                  className="text-sm px-4 py-2 rounded-md border border-zinc-700 text-zinc-200 hover:border-zinc-500 hover:text-white transition-colors"
-                >
-                  Sign in
-                </button>
-              )}
-            </header>
-
-            <main className="max-w-6xl mx-auto px-6 pb-14 pt-10 grid lg:grid-cols-2 gap-10 items-center">
+          {/* Main content area — same bg-black as app, no grid/glow effects */}
+          <div className="flex-1 flex items-center justify-center overflow-auto">
+            <main className="w-full max-w-5xl mx-auto px-6 py-12 grid lg:grid-cols-2 gap-12 items-center">
               <section>
-                <p className="text-xs uppercase tracking-[0.2em] text-blue-300 mb-4">Full-course deadline capture</p>
-                <h1 className="text-4xl md:text-5xl font-bold leading-tight">
-                  Sync <span className="underline">all</span> your assignments.
+                <h1 className="text-3xl md:text-4xl font-semibold leading-tight text-zinc-100">
+                  Every deadline,<br />one place.
                 </h1>
-                <p className="mt-5 text-zinc-300 text-base md:text-lg max-w-xl">
-                  CanvasSync combines native Canvas assignments with dates extracted from modules, files, pages, announcements, and syllabus documents, then shows everything in one timeline.
+                <p className="mt-4 text-zinc-400 text-[15px] leading-relaxed max-w-md">
+                  CanvasSync pulls assignments, module items, files, announcements, and syllabus dates from Canvas into a single weekly and calendar view.
                 </p>
 
-                <div className="mt-8 flex flex-col sm:flex-row gap-3">
+                <div className="mt-7">
                   {firebaseUser ? (
-                    <>
-                      <button
-                        onClick={() => setShowLandingPage(false)}
-                        className="inline-flex items-center justify-center gap-3 bg-white text-black px-6 py-3 rounded-md font-medium hover:bg-zinc-100 transition"
-                      >
-                        Go to App
-                      </button>
-                      <span className="inline-flex items-center text-sm text-zinc-400">
-                        Continue to your synced dashboard
-                      </span>
-                    </>
+                    <button
+                      onClick={() => setShowLandingPage(false)}
+                      className="inline-flex items-center justify-center gap-2.5 bg-blue-600 text-white px-5 py-2.5 rounded-md text-sm font-medium hover:bg-blue-700 transition-colors"
+                    >
+                      Go to App
+                    </button>
                   ) : (
-                    <>
-                      <button
-                        onClick={handleCanvasSignIn}
-                        className="inline-flex items-center justify-center gap-3 bg-white text-black px-6 py-3 rounded-md font-medium hover:bg-zinc-100 transition"
-                      >
-                        <img src="/canvas-logo.png" width="20" height="20" alt="" aria-hidden="true" />
-                        Sign in with Canvas
-                      </button>
-                      <span className="inline-flex items-center text-sm text-zinc-400">
-                        Secure sign-in and cloud sync
-                      </span>
-                    </>
+                    <button
+                      onClick={handleCanvasSignIn}
+                      className="inline-flex items-center justify-center gap-2.5 bg-blue-600 text-white px-5 py-2.5 rounded-md text-sm font-medium hover:bg-blue-700 transition-colors"
+                    >
+                      <img src="/canvas-logo.png" width="18" height="18" alt="" aria-hidden="true" style={{ filter: "brightness(0) invert(1)" }} />
+                      Sign in with Canvas
+                    </button>
                   )}
                 </div>
 
-                <div className="mt-10 grid sm:grid-cols-3 gap-3 text-sm">
-                  <div className="p-3 rounded-md border border-zinc-800 bg-zinc-950/70">
-                    <p className="text-zinc-200 font-medium">Beyond the assignments tab</p>
-                    <p className="text-zinc-500 mt-1">Pulls due dates from module items and uploaded files</p>
-                  </div>
-                  <div className="p-3 rounded-md border border-zinc-800 bg-zinc-950/70">
-                    <p className="text-zinc-200 font-medium">Parses real course docs</p>
-                    <p className="text-zinc-500 mt-1">Reads pages, announcements, and syllabus text for deadlines</p>
-                  </div>
-                  <div className="p-3 rounded-md border border-zinc-800 bg-zinc-950/70">
-                    <p className="text-zinc-200 font-medium">One deduped weekly view</p>
-                    <p className="text-zinc-500 mt-1">Merges overlapping items so you do not miss or double-count work</p>
-                  </div>
+                <div className="mt-9 space-y-2.5 text-sm">
+                  {[
+                    ["Modules & files", "Finds dates in uploaded schedules, not just the assignments tab"],
+                    ["Announcements & pages", "Catches deadline changes posted outside the gradebook"],
+                    ["Deduped timeline", "Merges overlapping items so nothing is missed or double-counted"],
+                  ].map(([title, desc]) => (
+                    <div key={title} className="flex items-start gap-3 p-3 rounded-md bg-zinc-950 border border-zinc-800/60">
+                      <span className="mt-0.5 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
+                      <div>
+                        <p className="text-zinc-200 font-medium text-[13px]">{title}</p>
+                        <p className="text-zinc-500 text-[12px] mt-0.5">{desc}</p>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </section>
 
