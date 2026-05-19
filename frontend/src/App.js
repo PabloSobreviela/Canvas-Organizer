@@ -15,13 +15,13 @@ const API_BASE = (() => {
 })();
 const COURSE_TIMEZONE = "America/New_York";
 
-function BrandWordmark({ className = "", height = 22 }) {
+function BrandWordmark({ className = "", height = 22, invert = false }) {
   return (
     <img
       src="/canvassync-wordmark.png"
       alt="CanvasSync"
       height={height}
-      style={{ height: `${height}px`, width: "auto" }}
+      style={{ height: `${height}px`, width: "auto", ...(invert ? { filter: "brightness(0) invert(1)" } : {}) }}
       className={className}
     />
   );
@@ -3072,10 +3072,10 @@ function App() {
           <header className="h-12 flex items-center justify-between px-5 bg-zinc-950 border-b border-zinc-800 shrink-0">
             {firebaseUser ? (
               <button onClick={() => setShowLandingPage(false)} aria-label="Return to app">
-                <BrandWordmark height={20} />
+                <BrandWordmark height={20} invert />
               </button>
             ) : (
-              <BrandWordmark height={20} />
+              <BrandWordmark height={20} invert />
             )}
             {firebaseUser ? (
               <button
@@ -3105,7 +3105,7 @@ function App() {
                   CanvasSync pulls assignments, module items, files, announcements, and syllabus dates from Canvas into a single weekly and calendar view.
                 </p>
 
-                <div className="mt-7">
+                <div className="mt-7 flex flex-wrap items-center gap-3">
                   {firebaseUser ? (
                     <button
                       onClick={() => setShowLandingPage(false)}
@@ -3602,7 +3602,7 @@ function App() {
               aria-label="Open CanvasSync landing page"
               title="Open landing page"
             >
-              <BrandWordmark height={24} />
+              <BrandWordmark height={24} invert />
             </button>
           </div>
           <div className="justify-self-center">
