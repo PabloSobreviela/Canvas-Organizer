@@ -15,7 +15,7 @@ const API_BASE = (() => {
 })();
 const COURSE_TIMEZONE = "America/New_York";
 
-function BrandWordmark({ className = "", height = 66 }) {
+function BrandWordmark({ className = "", height = 26 }) {
   return (
     <img
       src="/canvassync-wordmark.png"
@@ -1329,44 +1329,62 @@ function App() {
     }
   }, []);
 
-  // Demo mode: /demo URL bypasses auth with sample data for UI/UX development
+  // Demo mode: real syllabus PDFs + mock Canvas assignments, AI date extraction
   const isDemoMode = window.location.pathname === "/demo";
+  const [demoAutoSyncCourseId, setDemoAutoSyncCourseId] = useState(null);
+  const demoSyncStartedRef = useRef(false);
+
   useEffect(() => {
     if (!isDemoMode) return;
-    const demoUser = { uid: "demo-user", email: "demo@canvassync.dev", displayName: "Demo User" };
-    setFirebaseUser(demoUser);
-    setAuthLoading(false);
-    setCanvasBaseUrl("https://gatech.instructure.com");
-    setCanvasStatus("connected");
 
-    const demoCourses = [
-      { id: "math2552", name: "Differential Equations (MATH 2552)", courseCode: "MATH 2552", status: "SYNCED", isCurrentlyActive: true },
-      { id: "cs1332", name: "Data Structures & Algorithms (CS 1332)", courseCode: "CS 1332", status: "SYNCED", isCurrentlyActive: true },
-    ];
-    setActiveCourses(demoCourses);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/demo/session`, { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || "Demo mode is unavailable");
+        }
 
-    const now = new Date();
-    const mon = new Date(now); mon.setDate(now.getDate() - now.getDay() + 1);
-    const d = (offset, h = 23, m = 59) => { const t = new Date(mon); t.setDate(t.getDate() + offset); t.setHours(h, m, 0, 0); return t.toISOString(); };
+        const demoUser = {
+          uid: data.user?.uid || "a0000000-0000-4000-8000-000000000001",
+          email: data.user?.email || "demo@canvassync.dev",
+          displayName: data.user?.displayName || "Demo User",
+        };
+        storeDemoSession(data.token, demoUser);
+        if (cancelled) return;
 
-    const demoItems = {
-      math2552: [
-        { id: "m-hw5", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Homework 5 (Sections 3.1-3.3)", due: d(0), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "hw5" },
-        { id: "m-hw6", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Homework 6 (Sections 3.4-3.6)", due: d(7), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "hw6" },
-        { id: "m-quiz3", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Quiz 3 — Laplace Transforms", due: d(2, 14, 0), status: "OK", category: "EXAM", canvasAssignmentId: null, discoveredKey: "quiz3" },
-        { id: "m-midterm2", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Midterm 2", due: d(9, 14, 0), status: "OK", category: "EXAM", canvasAssignmentId: null, discoveredKey: "midterm2" },
-        { id: "m-reading", courseId: "math2552", courseName: "Differential Equations", courseCode: "MATH 2552", name: "Read Ch. 4 (Systems of ODEs)", due: d(3), status: "OK", category: "READING", canvasAssignmentId: null, discoveredKey: "read-ch4" },
-      ],
-      cs1332: [
-        { id: "c-hw7", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "HW 7 — AVL Trees", due: d(1), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "hw7" },
-        { id: "c-hw8", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "HW 8 — Hash Maps", due: d(8), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "hw8" },
-        { id: "c-exam2", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "Exam 2 — Trees & Heaps", due: d(4, 18, 0), status: "OK", category: "EXAM", canvasAssignmentId: null, discoveredKey: "exam2" },
-        { id: "c-recitation", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "Recitation Worksheet 8", due: d(2), status: "OK", category: "ASSIGNMENT", canvasAssignmentId: null, discoveredKey: "rec8" },
-        { id: "c-reading", courseId: "cs1332", courseName: "Data Structures & Algorithms", courseCode: "CS 1332", name: "Reading: Sorting Algorithms Ch. 12", due: d(5), status: "OK", category: "READING", canvasAssignmentId: null, discoveredKey: "read-sort" },
-      ],
+        setFirebaseUser(demoUser);
+        setAuthLoading(false);
+        setCanvasBaseUrl(data.canvas_base_url || "https://gatech.instructure.com");
+        setCanvasStatus("connected");
+        setItemsByCourse({});
+        setCompletedItems({});
+
+        const courses = Array.isArray(data.courses) ? data.courses : [];
+        setActiveCourses(
+          courses.map((course) => ({
+            ...course,
+            status: course.status || "NOT_SYNCED",
+            isCurrentlyActive: true,
+          }))
+        );
+
+        if (courses[0]?.id) {
+          const firstCourseId = String(courses[0].id);
+          setSelectedCourseId(firstCourseId);
+          setDemoAutoSyncCourseId(firstCourseId);
+        }
+      } catch (err) {
+        console.error("Demo bootstrap failed:", err);
+        setAuthLoading(false);
+        setCanvasStatus("Demo unavailable");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
     };
-    setItemsByCourse(demoItems);
-    setCompletedItems({ "m-hw5": true, "c-hw7": true });
   }, [isDemoMode]);
 
   // Listen to Firebase auth state changes
@@ -2439,7 +2457,7 @@ function App() {
 
     // In cloud mode, the Canvas token is stored server-side. A missing client-side token
     // is not necessarily an error, as long as we have saved credentials on the backend.
-    if (!baseUrl && !token) {
+    if (!isDemoMode && !baseUrl && !token) {
       alert("Please connect to Canvas first");
       return;
     }
@@ -2735,6 +2753,14 @@ function App() {
       isProcessingQueue.current = false;
     }
   }
+
+  // Auto-run real demo sync (syllabus PDFs → mock Canvas → AI resolve) once bootstrapped
+  useEffect(() => {
+    if (!isDemoMode || !demoAutoSyncCourseId || !firebaseUser) return;
+    if (demoSyncStartedRef.current) return;
+    demoSyncStartedRef.current = true;
+    void syncCourse(demoAutoSyncCourseId);
+  }, [isDemoMode, demoAutoSyncCourseId, firebaseUser]);
 
   // Process the sync queue
   const processQueue = useCallback(async () => {
@@ -3069,13 +3095,13 @@ function App() {
         />
         <div className="h-screen flex flex-col bg-black text-white" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
           {/* Top bar — mirrors the authenticated app header */}
-          <header className="min-h-16 flex items-center justify-between px-5 py-2 bg-zinc-950 border-b border-zinc-800 shrink-0">
+          <header className="h-12 flex items-center justify-between px-5 bg-zinc-950 border-b border-zinc-800 shrink-0">
             {firebaseUser ? (
               <button onClick={() => setShowLandingPage(false)} aria-label="Return to app">
-                <BrandWordmark height={60} />
+                <BrandWordmark height={24} />
               </button>
             ) : (
-              <BrandWordmark height={60} />
+              <BrandWordmark height={24} />
             )}
             {firebaseUser ? (
               <button
@@ -3602,7 +3628,7 @@ function App() {
               aria-label="Open CanvasSync landing page"
               title="Open landing page"
             >
-              <BrandWordmark height={72} />
+              <BrandWordmark height={29} />
             </button>
           </div>
           <div className="justify-self-center">
