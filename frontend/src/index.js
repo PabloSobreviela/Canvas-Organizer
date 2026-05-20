@@ -3,16 +3,31 @@ import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
 import PrivateTestingLogsPage from './pages/PrivateTestingLogsPage';
+import TermsPage from './pages/TermsPage';
+import PrivacyPage from './pages/PrivacyPage';
 import reportWebVitals from './reportWebVitals';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 
-function isLogsDashboardPath() {
-  const path = (window.location.pathname || '').replace(/\/+$/, '').toLowerCase();
-  return path === '/privatetestinglogs';
+function normalizePath(pathname) {
+  return (pathname || '').replace(/\/+$/, '').toLowerCase();
 }
 
-const appNode = isLogsDashboardPath() ? <PrivateTestingLogsPage /> : <App />;
+function RootApp() {
+  const path = normalizePath(window.location.pathname);
+  if (path === '/privatetestinglogs') {
+    return <PrivateTestingLogsPage />;
+  }
+  if (path === '/terms') {
+    return <TermsPage />;
+  }
+  if (path === '/privacy') {
+    return <PrivacyPage />;
+  }
+  return <App />;
+}
+
+const appNode = <RootApp />;
 
 root.render(
   process.env.NODE_ENV === 'development'
@@ -24,7 +39,4 @@ root.render(
     )
 );
 
-// If you want to start measuring performance in your app, pass a function
-// to log results (for example: reportWebVitals(console.log))
-// or send to an analytics endpoint. Learn more: https://bit.ly/CRA-vitals
 reportWebVitals();

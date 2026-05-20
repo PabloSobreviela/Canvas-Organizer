@@ -12,6 +12,8 @@ import {
   apiFetchOptions,
 } from './auth';
 import { API_BASE } from "./config";
+import { ConsentModal } from "./components/ConsentModal";
+import { LegalFooter } from "./components/LegalFooter";
 // Legacy firebase.js kept as reference; all auth now uses auth.js (Canvas OAuth)
 import { sileo, Toaster } from "sileo";
 import "sileo/styles.css";
@@ -20,6 +22,28 @@ import "sileo/styles.css";
 const COURSE_TIMEZONE = process.env.REACT_APP_DEFAULT_COURSE_TIMEZONE || "America/New_York";
 const ENABLE_MANUAL_TOKEN_CONNECT =
   (process.env.REACT_APP_ENABLE_MANUAL_TOKEN_CONNECT || "").trim().toLowerCase() === "true";
+const SHOW_PILOT_BANNER =
+  (process.env.REACT_APP_SHOW_PILOT_BANNER || "").trim().toLowerCase() === "true";
+
+async function fetchLegalConsentStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/me`, apiFetchOptions());
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data.legal_consent_accepted);
+  } catch {
+    return false;
+  }
+}
+
+function PilotBanner() {
+  if (!SHOW_PILOT_BANNER) return null;
+  return (
+    <div className="shrink-0 bg-amber-950/80 border-b border-amber-900/60 px-4 py-2 text-center text-xs text-amber-200">
+      <strong>Pilot.</strong> CanvasSync is not an official Georgia Tech service. Verify deadlines in Canvas.
+    </div>
+  );
+}
 
 function BrandWordmark({ className = "", height = 26 }) {
   return (
@@ -984,6 +1008,7 @@ function App() {
   // Authentication State
   const [firebaseUser, setFirebaseUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [legalConsentAccepted, setLegalConsentAccepted] = useState(false);
 
   // Canvas credentials (must be declared before loadCachedData uses them)
   const [canvasBaseUrl, setCanvasBaseUrl] = useState(
@@ -1440,6 +1465,16 @@ function App() {
     const unsubscribe = onAuthChange(async ({ user, token }) => {
       setFirebaseUser(user);
       setAuthLoading(false);
+
+      if (user) {
+        const consent =
+          typeof user.legalConsentAccepted === "boolean"
+            ? user.legalConsentAccepted
+            : await fetchLegalConsentStatus();
+        setLegalConsentAccepted(consent);
+      } else {
+        setLegalConsentAccepted(false);
+      }
 
       // Load cached data when user is authenticated
       if (user) {
@@ -2653,7 +2688,11 @@ function App() {
         );
 
         if (!resolveRes.ok) {
-          throw new Error(await readSyncErrorMessage(resolveRes, "Failed to resolve course dates"));
+          const resolveErr = await readSyncErrorMessage(resolveRes, "Failed to resolve course dates");
+          if (resolveRes.status === 403 && /consent/i.test(resolveErr)) {
+            setLegalConsentAccepted(false);
+          }
+          throw new Error(resolveErr);
         }
 
         const previousCourseItems = groupedCourseIds.flatMap((groupedId) => (
@@ -3282,19 +3321,26 @@ function App() {
               <LandingDemoSquare />
             </main>
           </div>
+          <LegalFooter />
         </div>
       </>
     );
   }
 
+  const showConsentModal = Boolean(firebaseUser) && !isDemoMode && !authLoading && !legalConsentAccepted;
+
   return (
     <>
+      {showConsentModal ? (
+        <ConsentModal onAccepted={() => setLegalConsentAccepted(true)} />
+      ) : null}
       <Toaster
         position="top-right"
         offset={syncToastOffset}
         options={{ fill: "#0b1020", roundness: 14, duration: 2600 }}
       />
       <div className={`h-screen flex flex-col bg-black app-font theme-app ${theme === "light" ? "theme-light" : "theme-dark"} ${colorMode === "vibrant" ? "mode-vibrant" : "mode-standard"}`}>
+        <PilotBanner />
         {/* Font Imports */}
         <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Patrick+Hand&family=Merriweather:wght@400;700&family=Space+Mono:wght@400;700&family=Roboto:wght@400;700&family=Lato:wght@400;700&family=Open+Sans:wght@400;700&family=Poppins:wght@400;600;700&display=swap');
@@ -4629,7 +4675,7 @@ function App() {
           </main>
         </div>
 
-
+        <LegalFooter className="shrink-0" />
       </div>
     </>
   );

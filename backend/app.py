@@ -1603,11 +1603,17 @@ if USE_FIRESTORE:
 @require_auth
 def get_current_user():
     """Get current authenticated user info"""
+    legal_consent_accepted = False
+    if USE_FIRESTORE:
+        from db_supabase import user_has_legal_consent
+        legal_consent_accepted = user_has_legal_consent(request.user_id)
+
     return jsonify({
         "user_id": request.user_id,
         "email": getattr(request, 'user_email', None),
         "name": getattr(request, 'user_name', None),
         "canvas_instance_url": os.getenv("CANVAS_INSTANCE_URL", "").rstrip("/"),
+        "legal_consent_accepted": legal_consent_accepted,
     })
 
 
@@ -2193,6 +2199,37 @@ def update_user_preferences_api():
         completed_items=completed_items,
     )
     return jsonify(updated)
+
+
+@app.route("/api/user/legal-consent", methods=["POST"])
+@require_auth
+@limiter.limit("20/hour")
+def record_legal_consent_api():
+    """Record acceptance of Terms, Privacy Policy, and AI processing disclosure."""
+    if not USE_FIRESTORE:
+        return jsonify({"success": True, "legal_consent_accepted": True})
+
+    payload = request.get_json(silent=True) or {}
+    if not payload.get("accepted"):
+        return jsonify({"error": "Consent must be accepted to continue."}), 400
+
+    from db_supabase import record_user_legal_consent
+
+    try:
+        record = record_user_legal_consent(
+            request.user_id,
+            version=str(payload.get("version") or "").strip() or None,
+        )
+    except Exception as exc:
+        logger.exception("legal-consent failed for user %s: %s", request.user_id, exc)
+        return jsonify({"error": "Failed to record consent."}), 500
+
+    return jsonify({
+        "success": True,
+        "legal_consent_accepted": True,
+        "legal_consent_at": record.get("legal_consent_at"),
+        "legal_consent_version": record.get("legal_consent_version"),
+    })
 
 
 @app.route("/api/user/delete-data", methods=["POST"])
@@ -3607,6 +3644,14 @@ def resolve_course_dates():
     user_id = request.user_id
     if not course_id:
         return jsonify({"error": "Missing course_id"}), 400
+
+    if USE_FIRESTORE and not is_demo_user(user_id, getattr(request, "is_demo", False)):
+        from db_supabase import user_has_legal_consent
+        if not user_has_legal_consent(user_id):
+            return jsonify({
+                "error": "Legal consent required before AI date resolution.",
+                "code": "legal_consent_required",
+            }), 403
 
     active_credential_key = None
     if USE_FIRESTORE:

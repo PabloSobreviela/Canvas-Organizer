@@ -363,9 +363,36 @@ def _user_row_to_dict(row: Dict) -> Dict:
         "starredCourses": row.get("starred_courses") or {},
         "syncEnabledCourses": row.get("sync_enabled_courses") or {},
         "completedItems": row.get("completed_items") or {},
+        "legalConsentAt": row.get("legal_consent_at"),
+        "legalConsentVersion": row.get("legal_consent_version"),
         "createdAt": row.get("created_at"),
         "lastLogin": row.get("last_login"),
         "updatedAt": row.get("updated_at"),
+    }
+
+
+LEGAL_CONSENT_VERSION = os.getenv("LEGAL_CONSENT_VERSION", "2026-05-20")
+
+
+def user_has_legal_consent(user_id: str) -> bool:
+    user = get_user(user_id)
+    if not user:
+        return False
+    return bool(user.get("legalConsentAt"))
+
+
+def record_user_legal_consent(user_id: str, version: str = None) -> Dict[str, Any]:
+    db = get_db()
+    now_ts = now_iso()
+    consent_version = (version or LEGAL_CONSENT_VERSION).strip()
+    db.table("users").update({
+        "legal_consent_at": now_ts,
+        "legal_consent_version": consent_version,
+        "updated_at": now_ts,
+    }).eq("id", user_id).execute()
+    return {
+        "legal_consent_at": now_ts,
+        "legal_consent_version": consent_version,
     }
 
 

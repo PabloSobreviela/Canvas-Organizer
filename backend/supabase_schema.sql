@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS users (
     starred_courses JSONB DEFAULT '{}',
     sync_enabled_courses JSONB DEFAULT '{}',
     completed_items JSONB DEFAULT '{}',
+    legal_consent_at TIMESTAMPTZ,
+    legal_consent_version TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     last_login TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()

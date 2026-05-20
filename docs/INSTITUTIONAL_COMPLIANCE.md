@@ -40,10 +40,12 @@ Users may call `POST /api/user/delete-data` to revoke Canvas tokens and erase al
 
 ## Privacy policy checklist
 
-- [ ] Publish privacy policy URL linked from app footer
-- [ ] Describe Canvas OAuth, data categories, AI subprocessors, retention, and deletion
-- [ ] Contact email for data requests
+- [x] Publish privacy policy URL linked from app footer (`/privacy`)
+- [x] Publish terms of service (`/terms`)
+- [x] Describe Canvas OAuth, data categories, OpenRouter AI, retention, and deletion
+- [ ] Contact email for data requests (set `REACT_APP_LEGAL_CONTACT_EMAIL` in prod)
 - [ ] GT-specific: confirm alignment with student code of conduct and acceptable use
+- [x] OpenRouter I/O logging off; ZDR enforced in code; content anonymity limitation disclosed
 
 ## Acceptance tests (manual)
 

@@ -159,6 +159,7 @@ async function fetchSessionFromServer() {
       email: data.email,
       displayName: data.name,
       canvasInstanceUrl: data.canvas_instance_url || null,
+      legalConsentAccepted: Boolean(data.legal_consent_accepted),
     };
   } catch {
     return null;

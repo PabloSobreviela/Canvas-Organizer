@@ -15,6 +15,18 @@ LLM_FALLBACK_BASE_URL = os.getenv("LLM_FALLBACK_BASE_URL", "https://api.deepinfr
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "Qwen/Qwen3-14B")
 
 AI_DEBUG = (os.getenv("AI_DEBUG") or "").strip().lower() in ("1", "true", "yes")
+OPENROUTER_ENFORCE_ZDR = (os.getenv("OPENROUTER_ENFORCE_ZDR", "true") or "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+OPENROUTER_ALLOW_FALLBACK = (os.getenv("OPENROUTER_ALLOW_FALLBACK", "false") or "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 _primary_client = None
 _fallback_client = None
@@ -55,6 +67,10 @@ def _get_primary_client():
     _primary_client = OpenAI(
         api_key=LLM_API_KEY,
         base_url=LLM_BASE_URL,
+        default_headers={
+            "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "https://canvassync.app"),
+            "X-Title": os.getenv("OPENROUTER_APP_TITLE", "CanvasSync"),
+        },
     )
     print(f"[OK] Primary LLM client initialized: {LLM_BASE_URL} (Model: {MODEL_NAME})")
     return _primary_client
@@ -85,9 +101,15 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
     On failure, retries against the fallback provider with a different model.
     """
     from openai import APIError, APIConnectionError, APITimeoutError, RateLimitError
+    from ai.prompt_sanitizer import sanitize_text_for_llm
 
     client = _get_primary_client()
     target_model = model or MODEL_NAME
+    prompt = sanitize_text_for_llm(prompt)
+
+    extra_body = {"reasoning": {"effort": "none"}}
+    if OPENROUTER_ENFORCE_ZDR:
+        extra_body["provider"] = {"zdr": True}
 
     messages = [
         {"role": "system", "content": "You are an expert academic schedule extraction system. Respond with valid JSON only."},
@@ -99,8 +121,7 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
         max_tokens=4096,
         temperature=0.2,
         top_p=0.95,
-        # OpenRouter: thinking.type=disabled still bills reasoning tokens on Qwen 3.5.
-        extra_body={"reasoning": {"effort": "none"}},
+        extra_body=extra_body,
     )
 
     telemetry = dict(telemetry_context or {})
@@ -128,7 +149,7 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
     if last_error is not None:
         e = last_error
         fallback_client = _get_fallback_client()
-        if fallback_client and FALLBACK_MODEL:
+        if fallback_client and FALLBACK_MODEL and OPENROUTER_ALLOW_FALLBACK:
             print(f"[WARN] Primary ({target_model}) failed: {e}; falling back to {FALLBACK_MODEL}")
             params["model"] = FALLBACK_MODEL
             params.pop("extra_body", None)
