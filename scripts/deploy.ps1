@@ -11,6 +11,9 @@ param(
   # LLM model used by backend/ai/llm_model.py via OpenRouter inference API.
   [string]$ModelName = "qwen/qwen3.5-flash-02-23",
 
+  # OpenRouter API key (or set LLM_API_KEY in the shell before deploy).
+  [string]$LlmApiKey = "",
+
   # Keeping at least 1 warm instance eliminates cold-start latency (cost tradeoff).
   [int]$MinInstances = 0,
   # Cloud Run resource sizing (cost/perf tradeoff). Prefer lower defaults for cost control.
@@ -91,6 +94,27 @@ try {
       "FALLBACK_MODEL=Qwen/Qwen3-14B"
     )
 
+    $resolvedLlmKey = if (-not [string]::IsNullOrWhiteSpace($LlmApiKey)) { $LlmApiKey } else { $env:LLM_API_KEY }
+    if ([string]::IsNullOrWhiteSpace($resolvedLlmKey)) {
+      $envFilePath = Join-Path $repoRoot "backend\.env"
+      if (Test-Path $envFilePath) {
+        foreach ($line in Get-Content $envFilePath) {
+          if ($line -match '^\s*LLM_API_KEY\s*=\s*(.+)\s*$') {
+            $candidate = $Matches[1].Trim().Trim('"').Trim("'")
+            if ($candidate -and $candidate -ne "your-openrouter-api-key") {
+              $resolvedLlmKey = $candidate
+            }
+            break
+          }
+        }
+      }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedLlmKey)) {
+      Write-Warning "LLM_API_KEY found in backend/.env but Cloud Run uses Secret Manager. Run scripts/configure-openrouter-key.ps1 to update the secret."
+    } else {
+      Write-Warning "LLM_API_KEY not set - run scripts/configure-openrouter-key.ps1 if AI resolve fails."
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($BillingProject)) {
       $envVarsList += "GCP_BILLING_PROJECT_ID=$BillingProject"
     }
@@ -122,7 +146,7 @@ try {
       "--memory", $Memory,
       "--cpu", $Cpu,
       "--min-instances", "$MinInstances",
-      "--set-env-vars", $envVars,
+      "--update-env-vars", $envVars,
       "--allow-unauthenticated"
     )
     Invoke-Step -Label "Deploy Cloud Run" -Exe "gcloud" -Args $runArgs

@@ -68,7 +68,7 @@ if USE_FIRESTORE:
         archive_course_file_texts, save_course_file_text_versioned,
         get_course_sync_version, increment_course_sync_version,
         cleanup_old_file_versions,
-        save_ai_usage_log, get_ai_usage_logs
+        save_ai_usage_log, get_ai_usage_logs, get_all_ai_usage_logs
     )
     from auth import require_auth, optional_auth
     logger.info("MODE: CLOUD (Supabase + Canvas OAuth)")
@@ -217,6 +217,16 @@ def _env_truthy(name: str, default: bool = False) -> bool:
 # Default False in production; require explicit opt-in to avoid accidental exposure
 ENABLE_CLOUD_COST_AUDIT_ENDPOINT = _env_truthy("ENABLE_CLOUD_COST_AUDIT_ENDPOINT", default=not _is_production)
 CLOUD_COST_ALLOWED_EMAILS = {email.lower() for email in _split_csv_env("CLOUD_COST_ALLOWED_EMAILS")}
+
+ENABLE_AI_USAGE_LOGS_DASHBOARD = _env_truthy("ENABLE_AI_USAGE_LOGS_DASHBOARD", default=True)
+AI_USAGE_LOGS_ALLOWED_EMAILS = {email.lower() for email in _split_csv_env("AI_USAGE_LOGS_ALLOWED_EMAILS")}
+
+try:
+    CANVAS_PAGINATION_MAX_PAGES = int(os.getenv("CANVAS_PAGINATION_MAX_PAGES", "50"))
+except (TypeError, ValueError):
+    CANVAS_PAGINATION_MAX_PAGES = 50
+if CANVAS_PAGINATION_MAX_PAGES < 1:
+    CANVAS_PAGINATION_MAX_PAGES = 1
 
 
 # Allow runtime config via env vars (comma-separated). These are additive.
@@ -1259,10 +1269,19 @@ def parse_canvas_link_header(link_header: str) -> dict:
     return out
 
 
-def canvas_get_paginated_list(url: str, headers: dict, params: dict = None, timeout: int = None, max_pages: int = 30):
+def canvas_get_paginated_list(
+    url: str,
+    headers: dict,
+    params: dict = None,
+    timeout: int = None,
+    max_pages: int = None,
+):
     """
     Fetch a Canvas API endpoint that returns a JSON list and may be paginated.
     """
+    if max_pages is None:
+        max_pages = CANVAS_PAGINATION_MAX_PAGES
+
     results = []
     next_url = url
     page = 0
@@ -1293,6 +1312,13 @@ def canvas_get_paginated_list(url: str, headers: dict, params: dict = None, time
         links = parse_canvas_link_header(resp.headers.get("Link"))
         next_url = links.get("next")
         next_params = None  # next_url already includes query
+
+    if next_url:
+        logger.warning(
+            "Canvas pagination truncated at %s pages for %s (increase CANVAS_PAGINATION_MAX_PAGES)",
+            max_pages,
+            url,
+        )
 
     return results
 
@@ -1819,18 +1845,9 @@ def get_ai_usage_logs_api():
     if USE_FIRESTORE:
         creds = get_user_canvas_credentials(user_id)
         active_credential_key = creds.get("canvas_credential_key") if creds else None
-
-        # Keep this scoped to the currently connected Canvas credentials.
-        if not active_credential_key:
-            return jsonify({
-                "logs": [],
-                "count": 0,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "total_tokens": 0,
-                "total_estimated_cost_usd": 0.0,
-                "canvas_credential_key": None,
-            })
+        if getattr(request, "is_demo", False):
+            from demo_service import DEMO_CREDENTIAL_KEY
+            active_credential_key = DEMO_CREDENTIAL_KEY
 
     logs = fetch_ai_usage_logs_for_user(
         user_id,
@@ -1852,6 +1869,139 @@ def get_ai_usage_logs_api():
         "total_tokens": total_tokens,
         "total_estimated_cost_usd": total_estimated_cost,
         "canvas_credential_key": active_credential_key,
+    })
+
+
+def _summarize_ai_usage_logs(logs: list) -> dict:
+    count = len(logs or [])
+    if count <= 0:
+        return {
+            "count": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_tokens": 0,
+            "total_estimated_cost_usd": 0.0,
+            "avg_input_tokens": 0.0,
+            "avg_output_tokens": 0.0,
+            "avg_total_tokens": 0.0,
+            "avg_estimated_cost_usd": 0.0,
+        }
+
+    total_input = sum(int(item.get("inputTokens") or 0) for item in logs)
+    total_output = sum(int(item.get("outputTokens") or 0) for item in logs)
+    total_tokens = sum(int(item.get("totalTokens") or 0) for item in logs)
+    total_cost = sum(float(item.get("estimatedCostUsd") or 0.0) for item in logs)
+
+    return {
+        "count": count,
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "total_tokens": total_tokens,
+        "total_estimated_cost_usd": round(total_cost, 10),
+        "avg_input_tokens": round(total_input / count, 2),
+        "avg_output_tokens": round(total_output / count, 2),
+        "avg_total_tokens": round(total_tokens / count, 2),
+        "avg_estimated_cost_usd": round(total_cost / count, 10),
+    }
+
+
+@app.route("/api/ai/usage-logs/dashboard", methods=["GET"])
+@require_auth
+def get_ai_usage_logs_dashboard_api():
+    """
+    Admin-only dashboard for AI token/cost logs across all users.
+    """
+    if not ENABLE_AI_USAGE_LOGS_DASHBOARD:
+        return jsonify({"error": "AI usage logs dashboard is disabled."}), 404
+
+    if _is_production and not AI_USAGE_LOGS_ALLOWED_EMAILS:
+        return jsonify({
+            "error": "AI usage logs dashboard access is not configured. Set AI_USAGE_LOGS_ALLOWED_EMAILS.",
+        }), 403
+
+    if AI_USAGE_LOGS_ALLOWED_EMAILS:
+        request_email = str(getattr(request, "user_email", "") or "").strip().lower()
+        if request_email not in AI_USAGE_LOGS_ALLOWED_EMAILS:
+            return jsonify({"error": "Not allowed to access AI usage logs dashboard."}), 403
+
+    try:
+        limit = int((request.args.get("limit") or "100").strip())
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 500))
+
+    model_filter = (request.args.get("model") or "").strip() or None
+
+    if USE_FIRESTORE:
+        try:
+            logs = get_all_ai_usage_logs(limit=limit, model_filter=model_filter)
+        except Exception as exc:
+            logger.exception("Failed to fetch AI usage dashboard logs: %s", exc)
+            return jsonify({"error": "Failed to load AI usage logs"}), 500
+    else:
+        conn = None
+        logs = []
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            model_needle = (model_filter or "").strip().lower()
+            cur.execute("""
+                SELECT id, user_id, course_id, request_id, operation, model,
+                       input_tokens, output_tokens, total_tokens, cached_tokens,
+                       estimated_cost_usd, currency, pricing_source, status,
+                       prompt_chars, is_resync, raw_json, created_at
+                FROM ai_usage_logs
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit * 4 if model_needle else limit,))
+            for row in cur.fetchall():
+                model_name = str(row["model"] or "").lower()
+                if model_needle and model_needle not in model_name:
+                    continue
+                raw = {}
+                if row["raw_json"]:
+                    try:
+                        raw = json.loads(row["raw_json"])
+                    except Exception:
+                        raw = {}
+                logs.append({
+                    "id": row["id"],
+                    "userId": str(row["user_id"] or ""),
+                    "courseId": row["course_id"],
+                    "requestId": row["request_id"],
+                    "operation": row["operation"],
+                    "model": row["model"],
+                    "llmProvider": raw.get("gen_ai.system") or raw.get("llm_provider"),
+                    "inputTokens": int(row["input_tokens"] or 0),
+                    "outputTokens": int(row["output_tokens"] or 0),
+                    "totalTokens": int(row["total_tokens"] or 0),
+                    "cachedTokens": int(row["cached_tokens"] or 0),
+                    "estimatedCostUsd": float(row["estimated_cost_usd"] or 0.0),
+                    "currency": row["currency"] or "USD",
+                    "pricingSource": row["pricing_source"] or "unconfigured",
+                    "status": row["status"] or "ok",
+                    "promptChars": int(row["prompt_chars"] or 0),
+                    "isResync": bool(row["is_resync"]) if row["is_resync"] is not None else None,
+                    "createdAt": row["created_at"],
+                    "promptText": raw.get("prompt_text") or "",
+                    "responseText": raw.get("response_text") or "",
+                    "errorType": raw.get("error_type"),
+                    "errorMessage": raw.get("error_message"),
+                    "raw": raw,
+                })
+                if len(logs) >= limit:
+                    break
+        except Exception as exc:
+            logger.warning("Failed to fetch SQLite AI dashboard logs: %s", exc)
+        finally:
+            if conn:
+                conn.close()
+
+    summary = _summarize_ai_usage_logs(logs)
+    return jsonify({
+        **summary,
+        "model_filter": model_filter,
+        "logs": logs,
     })
 
 
@@ -2466,6 +2616,26 @@ def sync_assignments():
             
             save_assignment(user_id, course_id, assignment_data, active_credential_key)
 
+        # Reconcile removals: delete Canvas-backed rows no longer returned by Canvas.
+        latest_canvas_ids = {
+            str(item.get("id"))
+            for item in assignments
+            if item.get("id") is not None
+        }
+        stale_doc_ids = []
+        for existing_row in get_course_assignments(user_id, course_id, active_credential_key):
+            existing_canvas_id = existing_row.get("canvasAssignmentId")
+            if existing_canvas_id is None:
+                continue
+            if str(existing_canvas_id) not in latest_canvas_ids:
+                stale_doc_ids.append(existing_row.get("id"))
+        if stale_doc_ids:
+            delete_assignments_by_doc_ids(
+                user_id,
+                stale_doc_ids,
+                canvas_credential_key=active_credential_key,
+            )
+
         # Fetch and return assignments
         all_assignments = get_course_assignments(user_id, course_id, active_credential_key)
         result = []
@@ -2874,12 +3044,15 @@ def sync_course_materials():
 
                 links = extract_links_from_html(body_html, base_url, include_all_files=True)
                 for link in links:
+                    stable_url_hash = hashlib.sha256(
+                        str(link.get("url") or "").encode("utf-8")
+                    ).hexdigest()[:16]
                     if link.get('is_google_sheet') or link.get('is_google_doc'):
                         files_to_download.append({
                             "url": link['url'],
                             "display_name": link['text'],
                             "source": "front_page_google_link",
-                            "file_id": f"google_{abs(hash(link['url']))}",
+                            "file_id": f"google_{stable_url_hash}",
                             "is_google_sheet": link.get('is_google_sheet', False),
                             "is_google_doc": link.get('is_google_doc', False),
                         })
@@ -2888,7 +3061,7 @@ def sync_course_materials():
                             "url": link['url'],
                             "display_name": link['text'],
                             "source": "front_page_link",
-                            "file_id": link.get("file_id") or f"link_{hash(link['url'])}"
+                            "file_id": link.get("file_id") or f"link_{stable_url_hash}"
                         })
         else:
             print(f"   [WARN] Front page not available (status {front_page_response.status_code})")
@@ -2912,12 +3085,15 @@ def sync_course_materials():
             if syllabus_html:
                 links = extract_links_from_html(syllabus_html, base_url, include_all_files=True)
                 for link in links:
+                    stable_url_hash = hashlib.sha256(
+                        str(link.get("url") or "").encode("utf-8")
+                    ).hexdigest()[:16]
                     if link.get('is_google_sheet') or link.get('is_google_doc'):
                         files_to_download.append({
                             "url": link['url'],
                             "display_name": link['text'],
                             "source": "syllabus_google_link",
-                            "file_id": f"google_{abs(hash(link['url']))}",
+                            "file_id": f"google_{stable_url_hash}",
                             "is_google_sheet": link.get('is_google_sheet', False),
                             "is_google_doc": link.get('is_google_doc', False),
                         })
@@ -2926,7 +3102,7 @@ def sync_course_materials():
                             "url": link['url'],
                             "display_name": link['text'],
                             "source": "syllabus_link",
-                            "file_id": link.get("file_id") or f"link_{hash(link['url'])}"
+                            "file_id": link.get("file_id") or f"link_{stable_url_hash}"
                         })
 
                 text = html_to_text(syllabus_html)
@@ -3096,12 +3272,15 @@ def sync_course_materials():
 
                 links = extract_links_from_html(body_html, base_url)
                 for link in links:
+                    stable_url_hash = hashlib.sha256(
+                        str(link.get("url") or "").encode("utf-8")
+                    ).hexdigest()[:16]
                     if link.get('is_google_sheet') or link.get('is_google_doc'):
                         files_to_download.append({
                             "url": link['url'],
                             "display_name": link['text'],
                             "source": "module_page_google_link",
-                            "file_id": f"google_{abs(hash(link['url']))}",
+                            "file_id": f"google_{stable_url_hash}",
                             "is_google_sheet": link.get('is_google_sheet', False),
                             "is_google_doc": link.get('is_google_doc', False),
                         })
@@ -3110,7 +3289,7 @@ def sync_course_materials():
                             "url": link['url'],
                             "display_name": link['text'],
                             "source": "module_page_link",
-                            "file_id": link.get("file_id") or f"link_{hash(link['url'])}"
+                            "file_id": link.get("file_id") or f"link_{stable_url_hash}"
                         })
 
                 fetched_pages += 1
@@ -3138,7 +3317,10 @@ def sync_course_materials():
     print(f"\n[SYNC 5/6] Downloading {len(files_to_download)} schedule files...")
 
     for file_info in files_to_download:
-        file_id = file_info.get("file_id", f"unknown_{hash(file_info.get('url', ''))}")
+        fallback_hash = hashlib.sha256(
+            str(file_info.get("url") or "").encode("utf-8")
+        ).hexdigest()[:16]
+        file_id = file_info.get("file_id", f"unknown_{fallback_hash}")
         display_name = file_info.get("display_name") or str(file_id)
         url = file_info.get("url")
         is_google_sheet = file_info.get("is_google_sheet", False)
@@ -3603,7 +3785,7 @@ def resolve_course_dates():
             resync_assignment_dates_with_llm,
         )
 
-        max_ai_attempts = 1
+        max_ai_attempts = 3
         ai_resp = None
         last_ai_error = None
         for attempt in range(1, max_ai_attempts + 1):
@@ -3671,9 +3853,13 @@ def resolve_course_dates():
         logger.error("AI resolve failed: %s", e)
         import traceback
         traceback.print_exc()
+        err_text = str(e or "")
+        if "LLM_API_KEY is not set" in err_text:
+            return jsonify({
+                "error": "AI is not configured on the server. Set LLM_API_KEY (OpenRouter) on Cloud Run.",
+            }), 503
         status_code = 503 if is_transient_ai_error(e) else 500
         error_label = "AI resolve temporarily unavailable" if status_code == 503 else "AI resolve failed"
-        # Do not expose exception details to client; log server-side only.
         return jsonify({"error": error_label}), status_code
 
     updated = 0

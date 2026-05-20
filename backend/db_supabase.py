@@ -165,55 +165,84 @@ def consume_hourly_rate_limit(user_id: str, limit_key: str, limit_per_hour: int)
     bucket_id = window_start.strftime("%Y%m%d%H")
     window_iso = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    existing = (
-        db.table("rate_limits")
-        .select("id, count")
-        .eq("user_id", user_id)
-        .eq("limit_key", limit_key)
-        .eq("time_window", window_iso)
-        .eq("bucket_id", bucket_id)
-        .limit(1)
-        .execute()
-    )
+    max_retries = 5
+    next_count = 1
+    increment_succeeded = False
+    for _ in range(max_retries):
+        existing = (
+            db.table("rate_limits")
+            .select("id, count")
+            .eq("user_id", user_id)
+            .eq("limit_key", limit_key)
+            .eq("time_window", window_iso)
+            .eq("bucket_id", bucket_id)
+            .limit(1)
+            .execute()
+        )
 
-    current_count = 0
-    row_exists = False
-    row_id = None
-    if existing.data:
-        row_exists = True
-        current_count = int(existing.data[0].get("count") or 0)
-        row_id = existing.data[0]["id"]
+        current_count = 0
+        row_exists = False
+        row_id = None
+        if existing.data:
+            row_exists = True
+            current_count = int(existing.data[0].get("count") or 0)
+            row_id = existing.data[0]["id"]
 
-    if current_count >= limit_per_hour:
+        if current_count >= limit_per_hour:
+            retry_after_seconds = max(1, int((window_end - now).total_seconds()))
+            return {
+                "allowed": False,
+                "count": current_count,
+                "limit": limit_per_hour,
+                "retry_after_seconds": retry_after_seconds,
+                "window_start": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "window_end": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+
+        next_count = current_count + 1
+        now_ts = now_iso()
+
+        if row_exists:
+            # Optimistic CAS update avoids lost updates under concurrency.
+            update_resp = (
+                db.table("rate_limits")
+                .update({"count": next_count, "updated_at": now_ts})
+                .eq("id", row_id)
+                .eq("count", current_count)
+                .execute()
+            )
+            if update_resp.data:
+                increment_succeeded = True
+                break
+        else:
+            try:
+                insert_resp = db.table("rate_limits").insert({
+                    "user_id": user_id,
+                    "limit_key": limit_key,
+                    "time_window": window_iso,
+                    "bucket_id": bucket_id,
+                    "count": next_count,
+                    "limit_value": limit_per_hour,
+                    "created_at": now_ts,
+                    "updated_at": now_ts,
+                }).execute()
+                if insert_resp.data:
+                    increment_succeeded = True
+                    break
+            except Exception:
+                # Another request likely inserted this bucket first; retry read/update.
+                continue
+
+    if not increment_succeeded:
         retry_after_seconds = max(1, int((window_end - now).total_seconds()))
         return {
             "allowed": False,
-            "count": current_count,
+            "count": limit_per_hour,
             "limit": limit_per_hour,
             "retry_after_seconds": retry_after_seconds,
             "window_start": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "window_end": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
-
-    next_count = current_count + 1
-    now_ts = now_iso()
-
-    if row_exists:
-        db.table("rate_limits").update({
-            "count": next_count,
-            "updated_at": now_ts,
-        }).eq("id", row_id).execute()
-    else:
-        db.table("rate_limits").insert({
-            "user_id": user_id,
-            "limit_key": limit_key,
-            "time_window": window_iso,
-            "bucket_id": bucket_id,
-            "count": next_count,
-            "limit_value": limit_per_hour,
-            "created_at": now_ts,
-            "updated_at": now_ts,
-        }).execute()
 
     retry_after_seconds = max(1, int((window_end - now).total_seconds()))
     return {
@@ -271,7 +300,19 @@ def upsert_user_with_id(user_id: str, email: str, display_name: str = None) -> s
     """Upsert a user row using a fixed UUID primary key (demo accounts)."""
     db = get_db()
     now_ts = now_iso()
-    db.table("users").upsert(
+    existing = get_user(user_id)
+    if existing:
+        db.table("users").update(
+            {
+                "email": email,
+                "display_name": display_name,
+                "last_login": now_ts,
+                "updated_at": now_ts,
+            }
+        ).eq("id", str(existing["id"])).execute()
+        return str(existing["id"])
+
+    db.table("users").insert(
         {
             "id": user_id,
             "canvas_user_id": user_id,
@@ -284,8 +325,7 @@ def upsert_user_with_id(user_id: str, email: str, display_name: str = None) -> s
             "created_at": now_ts,
             "last_login": now_ts,
             "updated_at": now_ts,
-        },
-        on_conflict="id",
+        }
     ).execute()
     return user_id
 
@@ -369,6 +409,37 @@ def update_user_canvas_credentials(user_id: str, api_url: str, token: str) -> st
         "updated_at": now_iso(),
     }).eq("id", user_id).execute()
 
+    return credential_key
+
+
+def update_user_canvas_oauth_credentials(
+    user_id: str,
+    api_url: str,
+    access_token: str,
+    refresh_token: str = None,
+    expires_at: str = None,
+) -> str:
+    """
+    Persist Canvas OAuth credentials so OAuth login alone can sync data.
+    """
+    db = get_db()
+    credential_key = build_canvas_credential_key(api_url, access_token)
+    stored_access_token = encrypt_canvas_token(access_token)
+    stored_refresh_token = encrypt_canvas_token(refresh_token) if refresh_token else None
+
+    payload = {
+        "canvas_api_url": api_url,
+        "canvas_api_token_encrypted": stored_access_token,
+        "canvas_credential_key": credential_key,
+        "canvas_access_token_encrypted": stored_access_token,
+        "updated_at": now_iso(),
+    }
+    if stored_refresh_token:
+        payload["canvas_refresh_token_encrypted"] = stored_refresh_token
+    if expires_at:
+        payload["canvas_token_expires_at"] = expires_at
+
+    db.table("users").update(payload).eq("id", user_id).execute()
     return credential_key
 
 
@@ -677,6 +748,27 @@ def get_assignment_by_canvas_id(
     return None
 
 
+_ASSIGNMENT_UPDATE_FIELD_MAP = {
+    "normalizedDueAt": "normalized_due_at",
+    "originalDueAt": "original_due_at",
+    "canvasAssignmentId": "canvas_assignment_id",
+    "sourceOfTruth": "source_of_truth",
+    "discoveredKey": "discovered_key",
+    "courseName": "course_name",
+    "courseCode": "course_code",
+    "rawCanvasJson": "raw_canvas_json",
+}
+
+
+def _normalize_assignment_updates(updates: Dict) -> Dict:
+    """Map legacy camelCase update keys to Postgres column names."""
+    normalized = {}
+    for key, value in (updates or {}).items():
+        db_key = _ASSIGNMENT_UPDATE_FIELD_MAP.get(key, key)
+        normalized[db_key] = value
+    return normalized
+
+
 def update_assignment(
     user_id: str,
     course_id: str,
@@ -686,6 +778,7 @@ def update_assignment(
 ):
     """Update an existing assignment."""
     db = get_db()
+    updates = _normalize_assignment_updates(updates)
     updates["updated_at"] = now_iso()
     query = (
         db.table("assignments")
@@ -1196,6 +1289,43 @@ def get_reading_items(user_id: str, course_id: str, canvas_credential_key: str =
 # AI USAGE LOG OPERATIONS
 # =============================================================================
 
+def _ai_usage_row_to_dict(row: Dict[str, Any], raw_data: Dict[str, Any] = None) -> Dict[str, Any]:
+    raw_data = raw_data if isinstance(raw_data, dict) else {}
+    if not raw_data and isinstance(row.get("raw_json"), dict):
+        raw_data = row.get("raw_json") or {}
+    if not raw_data and isinstance(row.get("raw_json"), str):
+        try:
+            raw_data = json.loads(row.get("raw_json") or "{}")
+        except Exception:
+            raw_data = {}
+
+    return {
+        "id": str(row.get("id") or ""),
+        "userId": str(row.get("user_id") or raw_data.get("user_id") or ""),
+        "courseId": row.get("course_id"),
+        "requestId": row.get("request_id"),
+        "operation": row.get("operation"),
+        "model": row.get("model"),
+        "llmProvider": raw_data.get("gen_ai.system") or raw_data.get("llm_provider"),
+        "inputTokens": int(row.get("input_tokens") or 0),
+        "outputTokens": int(row.get("output_tokens") or 0),
+        "totalTokens": int(row.get("total_tokens") or 0),
+        "cachedTokens": int(row.get("cached_tokens") or 0),
+        "estimatedCostUsd": float(row.get("estimated_cost_usd") or 0.0),
+        "currency": row.get("currency") or "USD",
+        "pricingSource": row.get("pricing_source") or "unconfigured",
+        "status": row.get("status") or "ok",
+        "promptChars": int(row.get("prompt_chars") or 0),
+        "isResync": bool(row.get("is_resync")) if row.get("is_resync") is not None else None,
+        "createdAt": row.get("created_at"),
+        "promptText": "",
+        "responseText": "",
+        "errorType": raw_data.get("error_type"),
+        "errorMessage": raw_data.get("error_message"),
+        "raw": raw_data,
+    }
+
+
 def save_ai_usage_log(
     user_id: str,
     log_data: Dict[str, Any],
@@ -1271,26 +1401,52 @@ def get_ai_usage_logs(
             except Exception:
                 raw_data = {}
 
-        logs.append({
-            "id": str(row["id"]),
-            "courseId": row.get("course_id"),
-            "requestId": row.get("request_id"),
-            "operation": row.get("operation"),
-            "model": row.get("model"),
-            "inputTokens": int(row.get("input_tokens") or 0),
-            "outputTokens": int(row.get("output_tokens") or 0),
-            "totalTokens": int(row.get("total_tokens") or 0),
-            "cachedTokens": int(row.get("cached_tokens") or 0),
-            "estimatedCostUsd": float(row.get("estimated_cost_usd") or 0.0),
-            "currency": row.get("currency") or "USD",
-            "pricingSource": row.get("pricing_source") or "unconfigured",
-            "status": row.get("status") or "ok",
-            "promptChars": int(row.get("prompt_chars") or 0),
-            "isResync": bool(row.get("is_resync")) if row.get("is_resync") is not None else None,
-            "createdAt": row.get("created_at"),
-            "raw": raw_data,
-        })
+        logs.append(_ai_usage_row_to_dict(row, raw_data))
 
+        if len(logs) >= requested_limit:
+            break
+
+    return logs
+
+
+def get_all_ai_usage_logs(
+    *,
+    limit: int = 100,
+    model_filter: str = None,
+) -> List[Dict[str, Any]]:
+    """Return recent AI usage logs across all users (testing dashboard)."""
+    db = get_db()
+
+    try:
+        requested_limit = int(limit or 100)
+    except (TypeError, ValueError):
+        requested_limit = 100
+    requested_limit = max(1, min(requested_limit, 500))
+
+    fetch_limit = requested_limit * 4 if model_filter else requested_limit
+    resp = (
+        db.table("ai_usage_logs")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(fetch_limit)
+        .execute()
+    )
+
+    model_needle = (model_filter or "").strip().lower()
+    logs: List[Dict[str, Any]] = []
+    for row in (resp.data or []):
+        raw_data = row.get("raw_json") or {}
+        if isinstance(raw_data, str):
+            try:
+                raw_data = json.loads(raw_data)
+            except Exception:
+                raw_data = {}
+
+        model_name = str(row.get("model") or "").lower()
+        if model_needle and model_needle not in model_name:
+            continue
+
+        logs.append(_ai_usage_row_to_dict(row, raw_data))
         if len(logs) >= requested_limit:
             break
 

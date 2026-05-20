@@ -1,19 +1,24 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ChevronLeft, ChevronRight, Calendar, List, CheckCircle2, Circle, User, X, Menu, Filter, Palette, Settings2 } from "lucide-react";
-import { signInWithCanvas, logout, onAuthChange, getAuthToken, initAuth, storeDemoSession } from './auth';
+import {
+  signInWithCanvas,
+  logout,
+  onAuthChange,
+  getAuthToken,
+  getDemoToken,
+  initAuth,
+  storeDemoSession,
+  purgeDemoAuthArtifacts,
+} from './auth';
+import { API_BASE } from "./config";
 // Legacy firebase.js kept as reference; all auth now uses auth.js (Canvas OAuth)
 import { sileo, Toaster } from "sileo";
 import "sileo/styles.css";
 
-// API Base URL - required in production to avoid hardcoded fallback pointing at wrong project
-const API_BASE = (() => {
-  const url = process.env.REACT_APP_API_URL?.trim();
-  if (process.env.NODE_ENV === 'production' && !url) {
-    throw new Error('REACT_APP_API_URL is required for production builds. Set it in your build environment.');
-  }
-  return url || 'https://canvas-organizer-backend-93870731079.us-central1.run.app';
-})();
-const COURSE_TIMEZONE = "America/New_York";
+// GT-first default timezone, overridable for future non-GT tenants.
+const COURSE_TIMEZONE = process.env.REACT_APP_DEFAULT_COURSE_TIMEZONE || "America/New_York";
+const ENABLE_MANUAL_TOKEN_CONNECT =
+  (process.env.REACT_APP_ENABLE_MANUAL_TOKEN_CONNECT || "").trim().toLowerCase() === "true";
 
 function BrandWordmark({ className = "", height = 26 }) {
   return (
@@ -102,11 +107,30 @@ function LandingDemoSquare() {
   );
 }
 
+const SYNC_DEFAULT_TIMEOUT_MS = 30000;
+/** AI resolve sends large syllabus payloads to OpenRouter and often exceeds 30s. */
+const AI_RESOLVE_TIMEOUT_MS = 120000;
+
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = setTimeout(() => {
+    controller.abort(
+      new DOMException(`Request timed out after ${Math.round(timeoutMs / 1000)}s`, "TimeoutError"),
+    );
+  }, timeoutMs);
   try {
     return await fetch(resource, { ...(options || {}), signal: controller.signal });
+  } catch (err) {
+    const isAbort = err?.name === "AbortError" || err?.name === "TimeoutError";
+    if (isAbort) {
+      const seconds = Math.round(timeoutMs / 1000);
+      throw new Error(
+        err?.message?.includes("timed out")
+          ? err.message
+          : `Request timed out after ${seconds} seconds. AI date resolution can take up to 2 minutes — try syncing again.`,
+      );
+    }
+    throw err;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -1329,15 +1353,26 @@ function App() {
     }
   }, []);
 
-  // Demo mode: real syllabus PDFs + mock Canvas assignments, AI date extraction
+  // Demo mode: isolated session (sessionStorage only), never mixed with real auth
   const isDemoMode = window.location.pathname === "/demo";
-  const [demoAutoSyncCourseId, setDemoAutoSyncCourseId] = useState(null);
-  const demoSyncStartedRef = useRef(false);
+  const [demoSession, setDemoSession] = useState(null);
+  const [demoBootstrapFailed, setDemoBootstrapFailed] = useState(false);
+  const [demoCourseId, setDemoCourseId] = useState(null);
+  const [showDemoIntro, setShowDemoIntro] = useState(() => window.location.pathname === "/demo");
+  const [highlightDemoSync, setHighlightDemoSync] = useState(false);
+
+  const handleExitDemo = useCallback(() => {
+    purgeDemoAuthArtifacts();
+    window.location.assign("/");
+  }, []);
 
   useEffect(() => {
     if (!isDemoMode) return;
 
     let cancelled = false;
+    setDemoBootstrapFailed(false);
+    setDemoSession(null);
+
     (async () => {
       try {
         const res = await fetch(`${API_BASE}/api/demo/session`, { method: "POST" });
@@ -1354,7 +1389,7 @@ function App() {
         storeDemoSession(data.token, demoUser);
         if (cancelled) return;
 
-        setFirebaseUser(demoUser);
+        setDemoSession({ user: demoUser, token: data.token });
         setAuthLoading(false);
         setCanvasBaseUrl(data.canvas_base_url || "https://gatech.instructure.com");
         setCanvasStatus("connected");
@@ -1373,11 +1408,14 @@ function App() {
         if (courses[0]?.id) {
           const firstCourseId = String(courses[0].id);
           setSelectedCourseId(firstCourseId);
-          setDemoAutoSyncCourseId(firstCourseId);
+          setDemoCourseId(firstCourseId);
+          setShowDemoIntro(true);
+          setHighlightDemoSync(false);
         }
       } catch (err) {
         console.error("Demo bootstrap failed:", err);
         setAuthLoading(false);
+        setDemoBootstrapFailed(true);
         setCanvasStatus("Demo unavailable");
       }
     })();
@@ -1386,6 +1424,8 @@ function App() {
       cancelled = true;
     };
   }, [isDemoMode]);
+
+  const activeUser = isDemoMode ? demoSession?.user : firebaseUser;
 
   // Listen to Firebase auth state changes
   useEffect(() => {
@@ -1669,8 +1709,8 @@ function App() {
 
   // Persist checklist state by user + connected Canvas credentials so reloads keep checkbox status.
   useEffect(() => {
-    if (!firebaseUser?.uid) {
-      setCompletedItems({});
+    if (isDemoMode || !firebaseUser?.uid) {
+      if (!isDemoMode) setCompletedItems({});
       return;
     }
 
@@ -1682,10 +1722,10 @@ function App() {
     }
 
     setCompletedItems(getSavedCompletedItems(firebaseUser.uid, connectedBaseUrl, connectedToken));
-  }, [firebaseUser?.uid, canvasBaseUrl, canvasToken]);
+  }, [firebaseUser?.uid, canvasBaseUrl, canvasToken, isDemoMode]);
 
   useEffect(() => {
-    if (!firebaseUser?.uid) return;
+    if (!firebaseUser?.uid || isDemoMode) return;
 
     const connectedBaseUrl = (canvasBaseUrl || localStorage.getItem("canvas_base_url") || "").trim();
     const connectedToken = (canvasToken || "").trim(); // may be empty in cloud mode
@@ -1697,7 +1737,7 @@ function App() {
       connectedBaseUrl,
       connectedToken
     );
-  }, [completedItems, firebaseUser?.uid, canvasBaseUrl, canvasToken]);
+  }, [completedItems, firebaseUser?.uid, canvasBaseUrl, canvasToken, isDemoMode]);
 
   const toggleFilter = (category) => {
     setWeeklyFilters(prev => ({ ...prev, [category]: !prev[category] }));
@@ -1757,8 +1797,9 @@ function App() {
   }, [starredCourses]);
 
   useEffect(() => {
+    if (isDemoMode) return;
     localStorage.setItem("sync_enabled_courses", JSON.stringify(normalizeTruthyCourseMap(syncEnabledCourses)));
-  }, [syncEnabledCourses]);
+  }, [syncEnabledCourses, isDemoMode]);
 
   const courseColorByCode = useMemo(() => {
     const byCode = {};
@@ -1870,6 +1911,16 @@ function App() {
     });
     setShowColorPicker(null);
   };
+
+  useEffect(() => {
+    if (!isDemoMode || !demoCourseId) return;
+    setSyncEnabledCourses({ [demoCourseId]: true });
+  }, [isDemoMode, demoCourseId]);
+
+  const handleDemoIntroOk = useCallback(() => {
+    setShowDemoIntro(false);
+    setHighlightDemoSync(true);
+  }, []);
 
   const setSyncEnabledCoursesAndPersist = useCallback((updater) => {
     setSyncEnabledCourses((prev) => {
@@ -2015,7 +2066,7 @@ function App() {
   }, [queueSyncCourses, syncEnabledCourseIds]);
 
   const fetchSyncWithRetry = useCallback(async (url, options = {}, retryOptions = {}) => {
-    const timeoutMs = Number(retryOptions?.timeoutMs) > 0 ? Number(retryOptions.timeoutMs) : 30000;
+    const timeoutMs = Number(retryOptions?.timeoutMs) > 0 ? Number(retryOptions.timeoutMs) : SYNC_DEFAULT_TIMEOUT_MS;
     return fetchWithTimeout(url, options, timeoutMs);
   }, []);
 
@@ -2103,15 +2154,32 @@ function App() {
   }, [syncEnabledDraft]);
 
   const renderSyncToolbarControls = useCallback(() => (
-    <div className="flex items-center">
+    <div className="flex flex-col items-center gap-1">
+      {isDemoMode && highlightDemoSync && !showDemoIntro ? (
+        <p className="text-[11px] font-medium text-amber-300/90 whitespace-nowrap">
+          Click Sync to load the demo course
+        </p>
+      ) : null}
       <button
-        onClick={queueSelectedSyncCourses}
-        disabled={selectedSyncCourseCount === 0 || isSyncInProgress}
-        className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm font-medium transition-colors ${selectedSyncCourseCount === 0 || isSyncInProgress
+        onClick={() => {
+          if (highlightDemoSync) setHighlightDemoSync(false);
+          queueSelectedSyncCourses();
+        }}
+        disabled={selectedSyncCourseCount === 0 || isSyncInProgress || (isDemoMode && showDemoIntro)}
+        className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm font-medium transition-colors ${selectedSyncCourseCount === 0 || isSyncInProgress || (isDemoMode && showDemoIntro)
           ? "cursor-not-allowed bg-blue-700 text-blue-100 border-blue-700 opacity-70"
           : "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
+          } ${highlightDemoSync && !showDemoIntro
+            ? "ring-2 ring-amber-400 ring-offset-2 ring-offset-zinc-950 animate-pulse shadow-lg shadow-amber-500/25"
+            : ""
           }`}
-        title={selectedSyncCourseCount === 0 ? "Select classes in Class Settings first" : "Sync all selected classes"}
+        title={
+          isDemoMode && showDemoIntro
+            ? "Close the demo intro first"
+            : selectedSyncCourseCount === 0
+              ? "Select classes in Class Settings first"
+              : "Sync all selected classes"
+        }
       >
         <span>
           {isSyncInProgress
@@ -2124,9 +2192,12 @@ function App() {
     </div>
   ), [
     allSelectedCoursesAlreadySynced,
+    highlightDemoSync,
+    isDemoMode,
     isSyncInProgress,
     queueSelectedSyncCourses,
     selectedSyncCourseCount,
+    showDemoIntro,
   ]);
 
   // Profile modal tabs
@@ -2261,8 +2332,12 @@ function App() {
     const token = canvasToken.trim();
 
 
-    if (!baseUrl || !token) {
-      setCanvasStatus("Missing URL or token");
+    if (!baseUrl) {
+      setCanvasStatus("Missing Canvas URL");
+      return;
+    }
+    if (ENABLE_MANUAL_TOKEN_CONNECT && !token) {
+      setCanvasStatus("Missing access token");
       return;
     }
 
@@ -2463,9 +2538,11 @@ function App() {
     }
 
     // Get fresh auth token for API calls
-    const authToken = await getAuthToken();
+    const authToken = isDemoMode
+      ? (demoSession?.token || getDemoToken())
+      : await getAuthToken();
     if (!authToken) {
-      alert("Please sign in first");
+      alert(isDemoMode ? "Demo session expired. Refresh /demo to try again." : "Please sign in first");
       return;
     }
     const authHeaders = {
@@ -2558,14 +2635,18 @@ function App() {
 
         updateGroupedSyncStatus("Resolving dates with AI...");
 
-        const resolveRes = await fetchSyncWithRetry(`${API_BASE}/api/resolve_course_dates`, {
-          method: "POST",
-          headers: authHeaders,
-          body: JSON.stringify({
-            course_id: courseId,
-            course_timezone: "America/New_York",
-          }),
-        });
+        const resolveRes = await fetchSyncWithRetry(
+          `${API_BASE}/api/resolve_course_dates`,
+          {
+            method: "POST",
+            headers: authHeaders,
+            body: JSON.stringify({
+              course_id: courseId,
+              course_timezone: COURSE_TIMEZONE,
+            }),
+          },
+          { timeoutMs: AI_RESOLVE_TIMEOUT_MS },
+        );
 
         if (!resolveRes.ok) {
           throw new Error(await readSyncErrorMessage(resolveRes, "Failed to resolve course dates"));
@@ -2603,40 +2684,34 @@ function App() {
           return dedupeAssignmentsWithinCourse(mapped);
         };
 
+        updateGroupedSyncStatus("Loading resolved assignments...");
+
+        const cachedRes = await fetchSyncWithRetry(`${API_BASE}/api/user/assignments?lite=1`, {
+          headers: authHeaders,
+        });
+        if (!cachedRes.ok) {
+          throw new Error(await readSyncErrorMessage(cachedRes, "Failed to load resolved assignments"));
+        }
+        const cachedData = await cachedRes.json().catch(() => ({}));
+        const allCachedAssignments = Array.isArray(cachedData?.assignments) ? cachedData.assignments : [];
+        const groupedIdSet = new Set(groupedCourseIds.map((id) => normalizeCourseId(id)));
+        const resolvedAssignmentsByCourse = Object.fromEntries(
+          groupedCourseIds.map((groupedId) => [groupedId, []])
+        );
+        for (const row of allCachedAssignments) {
+          const rowCourseId = normalizeCourseId(row?.courseId || row?.course_id);
+          if (!groupedIdSet.has(rowCourseId)) continue;
+          const matchedId = groupedCourseIds.find((groupedId) => normalizeCourseId(groupedId) === rowCourseId);
+          if (matchedId) {
+            resolvedAssignmentsByCourse[matchedId].push(row);
+          }
+        }
+
         const normalizedAssignmentsByCourse = {};
-        const maxFinalFetchAttempts = 1;
 
         for (const groupedId of groupedCourseIds) {
-          let finalAssignListRaw = [];
-          for (let attempt = 1; attempt <= maxFinalFetchAttempts; attempt++) {
-            const finalRes = await fetchSyncWithRetry(`${API_BASE}/api/sync_assignments`, {
-              method: "POST",
-              headers: authHeaders,
-              body: JSON.stringify({
-                base_url: baseUrl,
-                token,
-                course_id: groupedId,
-              }),
-            });
-
-            if (!finalRes.ok) {
-              throw new Error(await readSyncErrorMessage(finalRes, "Failed to fetch final assignments"));
-            }
-
-            const finalData = await finalRes.json().catch(() => ({}));
-            finalAssignListRaw = Array.isArray(finalData?.a)
-              ? finalData.a
-              : Array.isArray(finalData?.assignments)
-                ? finalData.assignments
-                : [];
-
-            if (finalAssignListRaw.length > 0 || attempt === maxFinalFetchAttempts) {
-              break;
-            }
-          }
-
           const initialNormalizedAssignments = mapAssignmentsForCourse(initialAssignmentsByCourse[groupedId] || [], groupedId);
-          let normalizedAssignments = mapAssignmentsForCourse(finalAssignListRaw, groupedId);
+          let normalizedAssignments = mapAssignmentsForCourse(resolvedAssignmentsByCourse[groupedId] || [], groupedId);
           if (!normalizedAssignments.length) {
             if (initialNormalizedAssignments.length > 0) {
               normalizedAssignments = initialNormalizedAssignments;
@@ -2693,7 +2768,7 @@ function App() {
               }
             }
 
-            if (changed && firebaseUser?.uid) {
+            if (changed && activeUser?.uid && !isDemoMode) {
               persistCompletedItemsDebounced(next);
             }
             return changed ? next : prev;
@@ -2753,14 +2828,6 @@ function App() {
       isProcessingQueue.current = false;
     }
   }
-
-  // Auto-run real demo sync (syllabus PDFs → mock Canvas → AI resolve) once bootstrapped
-  useEffect(() => {
-    if (!isDemoMode || !demoAutoSyncCourseId || !firebaseUser) return;
-    if (demoSyncStartedRef.current) return;
-    demoSyncStartedRef.current = true;
-    void syncCourse(demoAutoSyncCourseId);
-  }, [isDemoMode, demoAutoSyncCourseId, firebaseUser]);
 
   // Process the sync queue
   const processQueue = useCallback(async () => {
@@ -3065,8 +3132,43 @@ function App() {
     return itemsByDateStr[date.toDateString()] || [];
   }, [itemsByDateStr]);
 
-  // Show loading while checking auth
-  if (authLoading) {
+  if (isDemoMode && !demoSession && !demoBootstrapFailed) {
+    return (
+      <>
+        <Toaster position="top-center" offset={16} options={{ fill: "#0b1020", roundness: 12, duration: 2600 }} />
+        <div className="h-screen flex items-center justify-center bg-black text-white">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+            <p>Starting demo…</p>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (isDemoMode && demoBootstrapFailed) {
+    return (
+      <>
+        <Toaster position="top-center" offset={16} options={{ fill: "#0b1020", roundness: 12, duration: 2600 }} />
+        <div className="h-screen flex flex-col items-center justify-center bg-black text-white px-6">
+          <p className="text-lg font-medium text-zinc-200">Demo is unavailable</p>
+          <p className="mt-2 text-sm text-zinc-500 text-center max-w-sm">
+            The demo sandbox could not start. Check that the backend is running and try again later.
+          </p>
+          <button
+            type="button"
+            onClick={handleExitDemo}
+            className="mt-6 px-5 py-2.5 rounded-md bg-zinc-800 border border-zinc-600 text-sm font-medium hover:bg-zinc-700"
+          >
+            Exit demo
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  // Show loading while checking auth (real accounts only)
+  if (authLoading && !isDemoMode) {
     return (
       <>
         <Toaster
@@ -3084,8 +3186,8 @@ function App() {
     );
   }
 
-  // Show landing screen when unauthenticated OR when user explicitly opens landing from app.
-  if (!firebaseUser || showLandingPage) {
+  // Landing page is for signed-out users on / only — never shown inside /demo
+  if (!isDemoMode && (!firebaseUser || showLandingPage)) {
     return (
       <>
         <Toaster
@@ -3446,24 +3548,26 @@ function App() {
                         <div className="flex items-center justify-between">
                           <p className="text-sm text-zinc-200 font-medium">Canvas</p>
                           <span
-                            className={`text-xs px-2 py-1 rounded ${canvasBaseUrl && canvasToken
+                            className={`text-xs px-2 py-1 rounded ${canvasBaseUrl
                               ? "bg-green-950 text-green-300 border border-green-900"
                               : "bg-zinc-800 text-zinc-300 border border-zinc-700"
                               }`}
                           >
-                            {canvasBaseUrl && canvasToken ? "Configured" : "Not configured"}
+                            {canvasBaseUrl ? "Configured" : "Not configured"}
                           </span>
                         </div>
                         <div className="mt-2 text-xs text-zinc-500 space-y-1">
                           <div>
                             Base URL: <span className="text-zinc-300">{canvasBaseUrl || "--"}</span>
                           </div>
-                          <div>
-                            Token:{" "}
-                            <span className="text-zinc-300">
-                              {canvasToken ? `****${canvasToken.slice(-4)}` : "--"}
-                            </span>
-                          </div>
+                          {ENABLE_MANUAL_TOKEN_CONNECT ? (
+                            <div>
+                              Token:{" "}
+                              <span className="text-zinc-300">
+                                {canvasToken ? `****${canvasToken.slice(-4)}` : "--"}
+                              </span>
+                            </div>
+                          ) : null}
                           <div>
                             Current font:{" "}
                             <span className="text-zinc-300">
@@ -3486,18 +3590,20 @@ function App() {
                         />
                       </div>
 
-                      <div>
-                        <label className="block text-sm font-medium text-zinc-400 mb-2">
-                          Access Token
-                        </label>
-                        <input
-                          type="password"
-                          value={canvasToken}
-                          onChange={(e) => setCanvasToken(e.target.value)}
-                          className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
-                          placeholder="Paste your Canvas token"
-                        />
-                      </div>
+                      {ENABLE_MANUAL_TOKEN_CONNECT ? (
+                        <div>
+                          <label className="block text-sm font-medium text-zinc-400 mb-2">
+                            Access Token
+                          </label>
+                          <input
+                            type="password"
+                            value={canvasToken}
+                            onChange={(e) => setCanvasToken(e.target.value)}
+                            className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
+                            placeholder="Paste your Canvas token"
+                          />
+                        </div>
+                      ) : null}
 
                       <div className="flex gap-2 justify-end">
                         <button
@@ -3542,6 +3648,59 @@ function App() {
         )}
 
 
+
+        {/* Demo intro — user must acknowledge before syncing */}
+        {isDemoMode && showDemoIntro && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[70] p-4">
+            <div
+              className="bg-zinc-900 rounded-xl shadow-2xl w-full max-w-md border border-zinc-700 p-6"
+              role="dialog"
+              aria-labelledby="demo-intro-title"
+              aria-modal="true"
+            >
+              <p className="text-xs font-semibold uppercase tracking-widest text-amber-400/90">Demo mode</p>
+              <h2 id="demo-intro-title" className="mt-2 text-xl font-semibold text-white">
+                Welcome to the CanvasSync demo
+              </h2>
+
+              <ul className="mt-4 space-y-3 text-sm text-zinc-300 leading-relaxed">
+                <li>
+                  <span className="font-medium text-white">This is a demo.</span>{" "}
+                  No Canvas login is required — you are exploring a sandbox environment.
+                </li>
+                <li>
+                  <span className="font-medium text-white">Mock MATH 2552 data.</span>{" "}
+                  The course uses a real syllabus PDF and schedule, plus sample WebWork and quiz assignments (not your real Canvas account).
+                </li>
+                <li>
+                  <span className="font-medium text-white">How it works.</span>{" "}
+                  When you sync, we extract text from the syllabus files, load mock assignments, then use AI to match and fill in due dates — the same pipeline as production.
+                </li>
+              </ul>
+
+              <p className="mt-4 text-xs text-zinc-500">
+                After you continue, click the highlighted <span className="text-amber-300">Sync</span> button in the toolbar to start.
+              </p>
+
+              <div className="mt-6 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={handleExitDemo}
+                  className="px-4 py-2.5 rounded-lg border border-zinc-600 text-zinc-300 text-sm font-medium hover:bg-zinc-800"
+                >
+                  Exit demo
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDemoIntroOk}
+                  className="px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
+                >
+                  OK, got it
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Upgrade Modal (large) */}
         {showUpgradeModal && (
@@ -3618,18 +3777,27 @@ function App() {
             >
               <Menu size={20} />
             </button>
-            <button
-              onClick={() => {
-                setShowLandingPage(true);
-                setShowSyncProgressPopover(false);
-                setShowProfilePopup(false);
-              }}
-              className="flex items-center"
-              aria-label="Open CanvasSync landing page"
-              title="Open landing page"
-            >
-              <BrandWordmark height={29} />
-            </button>
+            {isDemoMode ? (
+              <div className="flex items-center gap-2">
+                <BrandWordmark height={29} />
+                <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-500/40 text-amber-300/90">
+                  Demo
+                </span>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setShowLandingPage(true);
+                  setShowSyncProgressPopover(false);
+                  setShowProfilePopup(false);
+                }}
+                className="flex items-center"
+                aria-label="Open CanvasSync landing page"
+                title="Open landing page"
+              >
+                <BrandWordmark height={29} />
+              </button>
+            )}
           </div>
           <div className="justify-self-center">
             {renderSyncToolbarControls()}
@@ -3680,6 +3848,16 @@ function App() {
               )}
             </div>
 
+            {isDemoMode ? (
+              <button
+                type="button"
+                onClick={handleExitDemo}
+                className="shrink-0 px-3 py-1.5 rounded-md border border-zinc-600 bg-zinc-900 text-sm font-medium text-zinc-200 hover:bg-zinc-800 hover:text-white transition-colors"
+                title="Leave demo and return to the home page"
+              >
+                Exit demo
+              </button>
+            ) : null}
           </div>
         </div>
 

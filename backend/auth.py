@@ -14,7 +14,13 @@ import jwt
 import requests
 from flask import request, jsonify, redirect
 
-from db_supabase import init_db, create_user, get_user, update_user_last_login
+from db_supabase import (
+    init_db,
+    create_user,
+    get_user,
+    update_user_last_login,
+    update_user_canvas_oauth_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +443,7 @@ def canvas_oauth_callback():
     token_data = token_response.json()
     access_token = token_data.get("access_token")
     refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in")
 
     if not access_token:
         return jsonify({"error": "No access token received from Canvas"}), 502
@@ -462,13 +469,34 @@ def canvas_oauth_callback():
 
     # Create/update user in Supabase
     user_id = f"canvas_{canvas_user_id}"
-    ensure_user_exists(user_id, email, display_name)
+    resolved_user_id = ensure_user_exists(user_id, email, display_name)
+
+    expires_at = None
+    try:
+        if expires_in is not None:
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        expires_at = None
+
+    # Persist OAuth credentials so users can sync immediately after OAuth login.
+    try:
+        update_user_canvas_oauth_credentials(
+            resolved_user_id,
+            CANVAS_INSTANCE_URL,
+            access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+        )
+    except Exception as exc:
+        logger.warning("Unable to persist Canvas OAuth credentials: %s", exc)
 
     # Issue session JWT
-    session_jwt = _issue_session_jwt(user_id, email, display_name)
+    session_jwt = _issue_session_jwt(resolved_user_id, email, display_name)
 
     frontend_redirect = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-    return redirect(f"{frontend_redirect}/?token={session_jwt}")
+    return redirect(f"{frontend_redirect}/#token={session_jwt}")
 
 
 def canvas_oauth_refresh():

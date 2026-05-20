@@ -1,13 +1,7 @@
 // API Client with Canvas OAuth Authentication
 // src/api.js
 
-const API_BASE = (() => {
-  const url = process.env.REACT_APP_API_URL?.trim();
-  if (process.env.NODE_ENV === 'production' && !url) {
-    throw new Error('REACT_APP_API_URL is required for production builds. Set it in your build environment.');
-  }
-  return url || 'http://localhost:5000';
-})();
+import { API_BASE } from "./config";
 
 async function getAuthToken() {
     try {

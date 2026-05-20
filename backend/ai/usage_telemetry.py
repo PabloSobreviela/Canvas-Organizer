@@ -13,8 +13,24 @@ _OTEL_LOGGER = None
 _DEFAULT_MODEL_PRICING_USD_PER_1M = {
     "qwen/qwen3.5-flash-02-23": {"input": 0.065, "output": 0.26},
     "qwen/qwen3.5-flash-20260224": {"input": 0.065, "output": 0.26},
+    "qwen/qwen3-14b": {"input": 0.07, "output": 0.13},
     "Qwen/Qwen3-14B": {"input": 0.07, "output": 0.13},
 }
+
+_MAX_LOG_PROMPT_CHARS = int(os.getenv("AI_LOG_MAX_PROMPT_CHARS", "0"))
+_MAX_LOG_RESPONSE_CHARS = int(os.getenv("AI_LOG_MAX_RESPONSE_CHARS", "0"))
+
+
+def _truncate_log_text(value: Any, max_chars: int) -> str:
+    text = str(value or "")
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    marker = "\n\n...[TRUNCATED FOR LOG STORAGE]...\n\n"
+    if max_chars <= len(marker) + 20:
+        return text[:max_chars]
+    head = int((max_chars - len(marker)) * 0.85)
+    tail = max_chars - len(marker) - head
+    return text[:head] + marker + text[-tail:]
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -65,15 +81,24 @@ def extract_usage_metrics(response: Any) -> Dict[str, int]:
     input_tokens = _read_usage_field(usage, "prompt_tokens")
     output_tokens = _read_usage_field(usage, "completion_tokens")
     total_tokens = _read_usage_field(usage, "total_tokens")
+    reasoning_tokens = 0
+
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    if completion_details is not None:
+        reasoning_tokens = _read_usage_field(completion_details, "reasoning_tokens")
 
     if total_tokens <= 0:
         total_tokens = max(0, input_tokens + output_tokens)
+
+    visible_output_tokens = max(0, output_tokens - reasoning_tokens)
 
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
         "cached_tokens": 0,
+        "reasoning_tokens": reasoning_tokens,
+        "visible_output_tokens": visible_output_tokens,
     }
 
 
@@ -221,6 +246,8 @@ def build_usage_payload(
     operation: str,
     telemetry_context: Optional[Dict[str, Any]] = None,
     prompt_chars: Optional[int] = None,
+    prompt_text: Optional[str] = None,
+    response_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     metrics = extract_usage_metrics(response)
     pricing = _estimate_cost_usd(model_name, metrics["input_tokens"], metrics["output_tokens"])
@@ -237,17 +264,20 @@ def build_usage_payload(
         "course_id": str(context.get("course_id")) if context.get("course_id") is not None else None,
         "is_resync": bool(context.get("is_resync")) if context.get("is_resync") is not None else None,
         # GenAI semantic conventions.
-        "gen_ai.system": "openrouter",
+        "gen_ai.system": str(context.get("llm_provider") or "openrouter"),
         "gen_ai.request.model": model_name,
         "gen_ai.usage.input_tokens": metrics["input_tokens"],
         "gen_ai.usage.output_tokens": metrics["output_tokens"],
         "gen_ai.usage.total_tokens": metrics["total_tokens"],
         "gen_ai.usage.cached_tokens": metrics["cached_tokens"],
+        "gen_ai.usage.reasoning_tokens": metrics["reasoning_tokens"],
         # App-level keys for DB/UI.
         "input_tokens": metrics["input_tokens"],
         "output_tokens": metrics["output_tokens"],
         "total_tokens": metrics["total_tokens"],
         "cached_tokens": metrics["cached_tokens"],
+        "reasoning_tokens": metrics["reasoning_tokens"],
+        "visible_output_tokens": metrics["visible_output_tokens"],
         "estimated_cost_usd": pricing["estimated_cost_usd"],
         "currency": pricing["currency"],
         "pricing_source": pricing["pricing_source"],
@@ -258,6 +288,8 @@ def build_usage_payload(
 
     if context.get("iteration") is not None:
         payload["iteration"] = _safe_int(context.get("iteration"), 0)
+
+    # Keep logs lightweight and privacy-preserving: do not persist raw prompts/responses.
 
     return payload
 

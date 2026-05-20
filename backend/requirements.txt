@@ -1,4 +1,4 @@
-# LLM inference (OpenAI-compatible API for Lambda Labs)
+# LLM inference (OpenAI-compatible API — OpenRouter, DeepInfra)
 openai>=1.30.0
 
 # Flask backend

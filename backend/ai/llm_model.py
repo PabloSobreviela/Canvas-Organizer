@@ -6,7 +6,6 @@ from datetime import datetime
 from ai.usage_telemetry import build_usage_payload, emit_usage_log, mark_usage_error
 
 # Primary provider: OpenRouter
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "qwen/qwen3.5-flash-02-23")
 
@@ -21,8 +20,26 @@ _primary_client = None
 _fallback_client = None
 
 
+def _clean_secret(value: str) -> str:
+    """Strip whitespace and UTF-8 BOM often introduced by .env editors."""
+    return (value or "").strip().strip("\ufeff").strip("\u200b")
+
+
+def _resolve_llm_api_key() -> str:
+    """Accept common env var names; ignore template placeholders."""
+    for name in ("LLM_API_KEY", "OPENROUTER_API_KEY", "LAMBDA_API_KEY"):
+        value = _clean_secret(os.getenv(name))
+        if not value or value == "your-openrouter-api-key":
+            continue
+        return value
+    return ""
+
+
+LLM_API_KEY = _resolve_llm_api_key()
+
+
 def _get_primary_client():
-    """Lazily create an OpenAI client for the primary provider (OpenRouter)."""
+    """Lazily create an OpenAI client for OpenRouter."""
     global _primary_client
     if _primary_client is not None:
         return _primary_client
@@ -32,7 +49,7 @@ def _get_primary_client():
     if not LLM_API_KEY:
         raise RuntimeError(
             "LLM_API_KEY is not set. "
-            "Configure it in .env or as an environment variable."
+            "Configure your OpenRouter API key in .env or Cloud Run environment variables."
         )
 
     _primary_client = OpenAI(
@@ -67,10 +84,10 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
     Send a chat-completion request via the primary provider.
     On failure, retries against the fallback provider with a different model.
     """
-    from openai import APIError, APIConnectionError, APITimeoutError
+    from openai import APIError, APIConnectionError, APITimeoutError, RateLimitError
 
-    target_model = model or MODEL_NAME
     client = _get_primary_client()
+    target_model = model or MODEL_NAME
 
     messages = [
         {"role": "system", "content": "You are an expert academic schedule extraction system. Respond with valid JSON only."},
@@ -82,29 +99,58 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
         max_tokens=4096,
         temperature=0.2,
         top_p=0.95,
-        extra_body={"thinking": {"type": "disabled"}},
+        # OpenRouter: thinking.type=disabled still bills reasoning tokens on Qwen 3.5.
+        extra_body={"reasoning": {"effort": "none"}},
     )
 
-    try:
-        response = client.chat.completions.create(**params)
-    except (APIError, APIConnectionError, APITimeoutError) as e:
+    telemetry = dict(telemetry_context or {})
+    telemetry.setdefault("llm_provider", "openrouter")
+
+    import time
+
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            response = client.chat.completions.create(**params)
+            last_error = None
+            break
+        except RateLimitError as e:
+            last_error = e
+            if attempt >= 3:
+                raise
+            backoff = min(20.0, 2.0 * attempt)
+            print(f"[WARN] LLM rate limited (attempt {attempt}/3); retrying in {backoff:.0f}s")
+            time.sleep(backoff)
+        except (APIError, APIConnectionError, APITimeoutError) as e:
+            last_error = e
+            break
+
+    if last_error is not None:
+        e = last_error
         fallback_client = _get_fallback_client()
         if fallback_client and FALLBACK_MODEL:
             print(f"[WARN] Primary ({target_model}) failed: {e}; falling back to {FALLBACK_MODEL}")
             params["model"] = FALLBACK_MODEL
+            params.pop("extra_body", None)
             response = fallback_client.chat.completions.create(**params)
+            telemetry["llm_provider"] = "deepinfra"
         else:
             raise
 
+    choices = getattr(response, "choices", None) or []
+    if not choices or not getattr(choices[0], "message", None):
+        raise RuntimeError(
+            f"LLM returned no choices (model={getattr(response, 'model', target_model)})."
+        )
+
+    raw_text = (choices[0].message.content or "").strip()
     usage_payload = build_usage_payload(
         response,
         model_name=response.model or target_model,
         operation=operation,
-        telemetry_context=telemetry_context,
+        telemetry_context=telemetry,
         prompt_chars=len(prompt),
     )
-
-    raw_text = (response.choices[0].message.content or "").strip()
     return raw_text, usage_payload
 
 
@@ -346,10 +392,10 @@ def resolve_assignment_dates_with_llm(
     today_str = now_local.strftime("%Y-%m-%d")
     tz_name = target_tz.zone if hasattr(target_tz, 'zone') else str(target_tz)
     
-    max_files_for_prompt = int(os.getenv("AI_MAX_FILES_FOR_PROMPT", "25"))
-    files_total_chars = int(os.getenv("AI_FILES_TOTAL_CHARS", "900000"))
-    per_file_soft_cap_chars = int(os.getenv("AI_FILE_SOFT_CAP_CHARS", "250000"))
-    per_file_min_chars = int(os.getenv("AI_FILE_MIN_CHARS", "10000"))
+    max_files_for_prompt = int(os.getenv("AI_MAX_FILES_FOR_PROMPT", "12"))
+    files_total_chars = int(os.getenv("AI_FILES_TOTAL_CHARS", "220000"))
+    per_file_soft_cap_chars = int(os.getenv("AI_FILE_SOFT_CAP_CHARS", "50000"))
+    per_file_min_chars = int(os.getenv("AI_FILE_MIN_CHARS", "4000"))
     max_announcement_chars = int(os.getenv("AI_MAX_ANNOUNCEMENT_CHARS", "1200"))
 
     files_payload = _build_files_payload_for_prompt(
@@ -642,12 +688,12 @@ def resync_assignment_dates_with_llm(
     today_str = now_local.strftime("%Y-%m-%d")
     tz_name = target_tz.zone if hasattr(target_tz, 'zone') else str(target_tz)
     
-    max_new_files_for_prompt = int(os.getenv("AI_RESYNC_MAX_NEW_FILES_FOR_PROMPT", "25"))
+    max_new_files_for_prompt = int(os.getenv("AI_RESYNC_MAX_NEW_FILES_FOR_PROMPT", "12"))
     max_prev_files_for_prompt = int(os.getenv("AI_RESYNC_MAX_PREV_FILES_FOR_PROMPT", "10"))
-    new_files_total_chars = int(os.getenv("AI_RESYNC_NEW_FILES_TOTAL_CHARS", "700000"))
-    prev_files_total_chars = int(os.getenv("AI_RESYNC_PREV_FILES_TOTAL_CHARS", "300000"))
-    per_file_soft_cap_chars = int(os.getenv("AI_FILE_SOFT_CAP_CHARS", "250000"))
-    per_file_min_chars = int(os.getenv("AI_FILE_MIN_CHARS", "10000"))
+    new_files_total_chars = int(os.getenv("AI_RESYNC_NEW_FILES_TOTAL_CHARS", "180000"))
+    prev_files_total_chars = int(os.getenv("AI_RESYNC_PREV_FILES_TOTAL_CHARS", "120000"))
+    per_file_soft_cap_chars = int(os.getenv("AI_FILE_SOFT_CAP_CHARS", "50000"))
+    per_file_min_chars = int(os.getenv("AI_FILE_MIN_CHARS", "4000"))
     max_announcement_chars = int(os.getenv("AI_MAX_ANNOUNCEMENT_CHARS", "1200"))
 
     allow_additions = bool(discover_new_assignments)

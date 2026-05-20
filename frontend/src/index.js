@@ -2,10 +2,17 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
+import PrivateTestingLogsPage from './pages/PrivateTestingLogsPage';
 import reportWebVitals from './reportWebVitals';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
-const appNode = <App />;
+
+function isLogsDashboardPath() {
+  const path = (window.location.pathname || '').replace(/\/+$/, '').toLowerCase();
+  return path === '/privatetestinglogs';
+}
+
+const appNode = isLogsDashboardPath() ? <PrivateTestingLogsPage /> : <App />;
 
 root.render(
   process.env.NODE_ENV === 'development'

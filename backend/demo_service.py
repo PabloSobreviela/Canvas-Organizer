@@ -197,6 +197,29 @@ def sync_demo_course_materials(
     }
 
 
+def _format_demo_assignments_response(
+    rows: List[Dict[str, Any]],
+    course_id: str,
+    now_iso: Callable[[], str],
+) -> Dict[str, Any]:
+    result = []
+    for row in rows:
+        if row.get("category") == "PLACEHOLDER":
+            continue
+        result.append(
+            {
+                "cid": row.get("canvasAssignmentId"),
+                "nam": row.get("name"),
+                "des": row.get("description"),
+                "due": row.get("normalizedDueAt") or row.get("originalDueAt"),
+                "st": row.get("status"),
+                "cat": row.get("category"),
+                "dk": row.get("discoveredKey"),
+            }
+        )
+    return {"crs": course_id, "a": result, "demo": True, "timestamp": now_iso()}
+
+
 def sync_demo_assignments(
     user_id: str,
     course_id: str,
@@ -212,9 +235,20 @@ def sync_demo_assignments(
 
     course_name = cfg["name"]
     course_code = cfg["courseCode"]
+    mock_assignments = _mock_canvas_assignments()
+    existing_rows = get_course_assignments(user_id, course_id, DEMO_CREDENTIAL_KEY)
+    existing_canvas = [
+        row for row in existing_rows
+        if row.get("canvasAssignmentId") is not None and row.get("category") != "PLACEHOLDER"
+    ]
+
+    # After AI resolve, the frontend fetches assignments again — do not wipe resolved dates.
+    if len(existing_canvas) >= len(mock_assignments):
+        return _format_demo_assignments_response(existing_rows, course_id, now_iso)
+
     delete_discovered_assignments(user_id, course_id, DEMO_CREDENTIAL_KEY)
 
-    for assignment in _mock_canvas_assignments():
+    for assignment in mock_assignments:
         canvas_assignment_id = assignment.get("id")
         name = assignment.get("name") or ""
         description = assignment.get("description") or ""
@@ -242,20 +276,8 @@ def sync_demo_assignments(
             DEMO_CREDENTIAL_KEY,
         )
 
-    result = []
-    for row in get_course_assignments(user_id, course_id, DEMO_CREDENTIAL_KEY):
-        if row.get("category") == "PLACEHOLDER":
-            continue
-        result.append(
-            {
-                "cid": row.get("canvasAssignmentId"),
-                "nam": row.get("name"),
-                "des": row.get("description"),
-                "due": row.get("normalizedDueAt") or row.get("originalDueAt"),
-                "st": row.get("status"),
-                "cat": row.get("category"),
-                "dk": row.get("discoveredKey"),
-            }
-        )
-
-    return {"crs": course_id, "a": result, "demo": True, "timestamp": now_iso()}
+    return _format_demo_assignments_response(
+        get_course_assignments(user_id, course_id, DEMO_CREDENTIAL_KEY),
+        course_id,
+        now_iso,
+    )
