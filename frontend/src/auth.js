@@ -1,5 +1,5 @@
 // Canvas OAuth Authentication
-// Replaces Firebase Auth with Canvas LMS OAuth2 + JWT sessions
+// Session via HttpOnly cookie on API domain (credentials: 'include')
 
 import { API_BASE } from "./config";
 
@@ -11,6 +11,7 @@ const DEMO_USER_STORAGE_KEY = 'canvassync_demo_user';
 let _authChangeCallbacks = [];
 let _currentUser = null;
 let _initialized = false;
+let _memoryToken = null;
 
 function _parseJwtPayload(token) {
   try {
@@ -46,8 +47,8 @@ function _notifyAuthChange(user) {
 }
 
 function _storeSession(token, user) {
+  _memoryToken = token;
   try {
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
     localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
   } catch {
     // Storage unavailable
@@ -55,6 +56,7 @@ function _storeSession(token, user) {
 }
 
 function _clearSession() {
+  _memoryToken = null;
   try {
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     localStorage.removeItem(USER_STORAGE_KEY);
@@ -64,6 +66,9 @@ function _clearSession() {
 }
 
 function getStoredToken() {
+  if (_memoryToken && !_isTokenExpired(_memoryToken)) {
+    return _memoryToken;
+  }
   try {
     const token = localStorage.getItem(TOKEN_STORAGE_KEY);
     if (token && !_isTokenExpired(token)) {
@@ -71,18 +76,18 @@ function getStoredToken() {
         _clearSession();
         return null;
       }
+      _memoryToken = token;
       return token;
     }
     if (token && _isTokenExpired(token)) {
       _clearSession();
     }
-    return null;
   } catch {
-    return null;
+    // Storage unavailable
   }
+  return null;
 }
 
-/** Demo tokens live in sessionStorage only — never mixed with the real account. */
 export function storeDemoSession(token, user) {
   try {
     sessionStorage.setItem(DEMO_TOKEN_STORAGE_KEY, token);
@@ -125,7 +130,6 @@ export function clearDemoSession() {
   }
 }
 
-/** Remove demo artifacts so the home page never treats demo as a signed-in user. */
 export function purgeDemoAuthArtifacts() {
   clearDemoSession();
   try {
@@ -138,7 +142,30 @@ export function purgeDemoAuthArtifacts() {
   }
 }
 
-export function initAuth() {
+async function fetchSessionFromServer() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/me`, {
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      return null;
+    }
+    const data = await res.json();
+    if (!data?.user_id) {
+      return null;
+    }
+    return {
+      uid: data.user_id,
+      email: data.email,
+      displayName: data.name,
+      canvasInstanceUrl: data.canvas_instance_url || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function initAuth() {
   if (_initialized) return;
   _initialized = true;
 
@@ -146,38 +173,32 @@ export function initAuth() {
     purgeDemoAuthArtifacts();
   }
 
-  const token = getStoredToken();
-  if (token) {
-    const payload = _parseJwtPayload(token);
-    if (payload) {
-      _currentUser = {
-        uid: payload.sub,
-        email: payload.email,
-        displayName: payload.name,
-        canvasInstanceUrl: payload.canvas_instance_url,
-      };
-    }
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('oauth') === 'success') {
+    const cleanUrl = window.location.origin + window.location.pathname;
+    window.history.replaceState({}, document.title, cleanUrl);
   }
 
-  // Check for OAuth callback token in URL (supports both query and hash fragment)
-  const params = new URLSearchParams(window.location.search);
-  const hashParams = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
-  const callbackToken = hashParams.get('token') || params.get('token');
-  if (callbackToken && !_isTokenExpired(callbackToken)) {
-    const payload = _parseJwtPayload(callbackToken);
-    if (payload && !payload.demo) {
-      const user = {
-        uid: payload.sub,
-        email: payload.email,
-        displayName: payload.name,
-        canvasInstanceUrl: payload.canvas_instance_url,
-      };
-      _storeSession(callbackToken, user);
-      _currentUser = user;
-
-      // Clean the token from the URL
-      const cleanUrl = window.location.origin + window.location.pathname;
-      window.history.replaceState({}, document.title, cleanUrl);
+  const serverUser = await fetchSessionFromServer();
+  if (serverUser) {
+    _currentUser = serverUser;
+    try {
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(serverUser));
+    } catch {
+      // Storage unavailable
+    }
+  } else {
+    const token = getStoredToken();
+    if (token) {
+      const payload = _parseJwtPayload(token);
+      if (payload) {
+        _currentUser = {
+          uid: payload.sub,
+          email: payload.email,
+          displayName: payload.name,
+          canvasInstanceUrl: payload.canvas_instance_url,
+        };
+      }
     }
   }
 
@@ -185,19 +206,18 @@ export function initAuth() {
 }
 
 export function signInWithCanvas() {
-  const loginUrl = `${API_BASE}/api/auth/canvas/login`;
-  window.location.href = loginUrl;
+  window.location.href = `${API_BASE}/api/auth/canvas/login`;
 }
 
 export async function logout() {
   try {
     const token = getStoredToken();
-    if (token) {
-      await fetch(`${API_BASE}/api/auth/logout`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-      }).catch(() => {});
-    }
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    await fetch(`${API_BASE}/api/auth/logout`, {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+    }).catch(() => {});
   } finally {
     _clearSession();
     _currentUser = null;
@@ -210,53 +230,39 @@ export async function getAuthToken() {
 }
 
 export function isAuthenticated() {
-  return !!getStoredToken();
+  return !!_currentUser || !!getStoredToken();
 }
 
 export function onAuthChange(callback) {
   _authChangeCallbacks.push(callback);
-
-  // Fire immediately with current state (never surface demo session here)
-  const token = getStoredToken();
-  if (token) {
-    const payload = _parseJwtPayload(token);
-    if (payload) {
-      callback({
-        user: {
-          uid: payload.sub,
-          email: payload.email,
-          displayName: payload.name,
-          canvasInstanceUrl: payload.canvas_instance_url,
-        },
-        token,
-      });
-    } else {
-      callback({ user: null, token: null });
-    }
-  } else {
-    callback({ user: null, token: null });
-  }
-
+  callback({
+    user: _currentUser,
+    token: getStoredToken(),
+  });
   return () => {
     _authChangeCallbacks = _authChangeCallbacks.filter(cb => cb !== callback);
   };
 }
 
 export function getCurrentUser() {
+  return _currentUser;
+}
+
+export function apiFetchOptions(extra = {}) {
   const token = getStoredToken();
-  if (!token) return null;
-  const payload = _parseJwtPayload(token);
-  if (!payload) return null;
+  const headers = {
+    ...(extra.headers || {}),
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   return {
-    uid: payload.sub,
-    email: payload.email,
-    displayName: payload.name,
-    photoURL: payload.avatar_url || null,
-    canvasInstanceUrl: payload.canvas_instance_url,
+    ...extra,
+    headers,
+    credentials: 'include',
   };
 }
 
-// Placeholder auth object for compatibility with firebase.js patterns
 export const auth = {
   get currentUser() {
     const user = getCurrentUser();

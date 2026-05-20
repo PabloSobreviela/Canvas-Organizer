@@ -1,0 +1,29 @@
+name: Security checks
+
+on:
+  push:
+    branches: [main, supabase-migration]
+  pull_request:
+    branches: [main, supabase-migration]
+
+jobs:
+  security-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Forbidden pattern scan
+        run: python scripts/security_check.py
+
+      - name: Python dependency audit
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt
+
+      - name: Frontend dependency audit
+        continue-on-error: true
+        working-directory: frontend
+        run: |
+          npm ci --ignore-scripts 2>/dev/null || npm install --ignore-scripts
+          npm audit --audit-level=high

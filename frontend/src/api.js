@@ -28,7 +28,8 @@ async function apiCall(endpoint, options = {}) {
     try {
         const response = await fetch(`${API_BASE}${endpoint}`, {
             ...options,
-            headers
+            headers,
+            credentials: 'include',
         });
 
         if (response.status === 401) {

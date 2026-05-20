@@ -176,15 +176,15 @@ ALTER TABLE ai_usage_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rate_limits ENABLE ROW LEVEL SECURITY;
 
 -- RLS policies: backend uses service_role key which bypasses RLS.
--- These policies are for any future direct client access.
-CREATE POLICY "Users can view own data" ON users FOR SELECT USING (true);
-CREATE POLICY "Users can view own courses" ON courses FOR SELECT USING (true);
-CREATE POLICY "Users can view own assignments" ON assignments FOR SELECT USING (true);
-CREATE POLICY "Users can view own file texts" ON course_file_texts FOR SELECT USING (true);
-CREATE POLICY "Users can view own announcements" ON announcements FOR SELECT USING (true);
-CREATE POLICY "Users can view own syllabus rules" ON syllabus_rules FOR SELECT USING (true);
-CREATE POLICY "Users can view own ai logs" ON ai_usage_logs FOR SELECT USING (true);
-CREATE POLICY "Service can manage rate limits" ON rate_limits FOR ALL USING (true);
+-- Deny direct anon/authenticated access; see migrations/002_fix_rls.sql for upgrades.
+CREATE POLICY "deny_direct_users" ON users FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_courses" ON courses FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_assignments" ON assignments FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_file_texts" ON course_file_texts FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_announcements" ON announcements FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_syllabus_rules" ON syllabus_rules FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_ai_logs" ON ai_usage_logs FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_rate_limits" ON rate_limits FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
 
 -- Create storage bucket for course files
 INSERT INTO storage.buckets (id, name, public) VALUES ('course-files', 'course-files', false)

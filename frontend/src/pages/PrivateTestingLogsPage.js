@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { getAuthToken, isAuthenticated } from "../auth";
+import { getAuthToken, isAuthenticated, apiFetchOptions } from "../auth";
 import { API_BASE } from "../config";
 
 const DEFAULT_MODEL_FILTER = "";
@@ -148,9 +148,12 @@ export default function PrivateTestingLogsPage() {
         params.set("model", modelFilter.trim());
       }
       const authToken = await getAuthToken();
-      const res = await fetch(`${API_BASE}/api/ai/usage-logs/dashboard?${params.toString()}`, {
-        headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
-      });
+      const res = await fetch(
+        `${API_BASE}/api/ai/usage-logs/dashboard?${params.toString()}`,
+        apiFetchOptions({
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+        }),
+      );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data.error || `Failed to load logs (${res.status})`);

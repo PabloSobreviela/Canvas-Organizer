@@ -161,12 +161,13 @@ def _courses_cache_set(cache_key: str, courses):
 # -----------------------------
 app = Flask(__name__)
 
-# Rate limiter: protects auth and credential endpoints from brute force / abuse
+# Rate limiter: Redis when RATELIMIT_STORAGE_URI is set (multi-instance safe)
+_RATELIMIT_STORAGE_URI = (os.getenv("RATELIMIT_STORAGE_URI") or "memory://").strip()
 limiter = Limiter(
     key_func=_rate_limit_key,
     app=app,
     default_limits=["200/hour"],
-    storage_uri="memory://",
+    storage_uri=_RATELIMIT_STORAGE_URI,
 )
 
 # -----------------------------------------------------------------------------
@@ -187,10 +188,12 @@ _DEFAULT_ALLOWED_ORIGINS = [
 _DEFAULT_ALLOWED_ORIGIN_PATTERNS = [
     "https://canvas-organizer-4437b--*.web.app",
     "https://canvas-organizer-4437b--*.firebaseapp.com",
-    "https://*.vercel.app",
     "https://canvassync.app",
     "https://www.canvassync.app",
 ]
+# Preview deploys: set CORS_ALLOWED_ORIGIN_PATTERNS=https://your-project-*.vercel.app in production if needed.
+if not os.getenv("K_SERVICE"):
+    _DEFAULT_ALLOWED_ORIGIN_PATTERNS.append("https://*.vercel.app")
 
 _LOCAL_DEV_ORIGINS = [
     "http://localhost:3000",
@@ -218,7 +221,8 @@ def _env_truthy(name: str, default: bool = False) -> bool:
 ENABLE_CLOUD_COST_AUDIT_ENDPOINT = _env_truthy("ENABLE_CLOUD_COST_AUDIT_ENDPOINT", default=not _is_production)
 CLOUD_COST_ALLOWED_EMAILS = {email.lower() for email in _split_csv_env("CLOUD_COST_ALLOWED_EMAILS")}
 
-ENABLE_AI_USAGE_LOGS_DASHBOARD = _env_truthy("ENABLE_AI_USAGE_LOGS_DASHBOARD", default=True)
+ENABLE_AI_USAGE_LOGS_DASHBOARD = _env_truthy("ENABLE_AI_USAGE_LOGS_DASHBOARD", default=False)
+ENABLE_DEMO_SESSION = _env_truthy("ENABLE_DEMO_SESSION", default=not _is_production)
 AI_USAGE_LOGS_ALLOWED_EMAILS = {email.lower() for email in _split_csv_env("AI_USAGE_LOGS_ALLOWED_EMAILS")}
 
 try:
@@ -352,7 +356,16 @@ os.makedirs(STORAGE_ROOT, exist_ok=True)
 # NOTE: Avoid doing network initialization at import time in Cloud Run. If Firebase/ADC
 # init blocks (or the metadata server is unreachable), the revision can fail to become
 # ready and Cloud Run will return 503s without CORS headers (making debugging painful).
-if not USE_FIRESTORE:
+if USE_FIRESTORE:
+    try:
+        from auth import validate_production_secrets
+        validate_production_secrets()
+        init_db()
+        logger.info("BOOT: cloud database and secrets validated")
+    except Exception as exc:
+        logger.error("BOOT: cloud init failed: %s", exc)
+        raise
+elif not USE_FIRESTORE:
     try:
         init_db()
     except Exception as exc:
@@ -1190,31 +1203,46 @@ def normalize_canvas_base_url(base_url: str) -> str:
     return f"https://{hostname}"
 
 
+def _validate_pagination_next_url(next_url: str, base_url: str) -> str | None:
+    """Ensure Canvas pagination links stay on an allowlisted host."""
+    if not next_url:
+        return None
+    try:
+        base_host = urlparse(base_url).hostname
+        next_host = urlparse(next_url).hostname
+    except Exception:
+        return None
+    if not base_host or not next_host:
+        return None
+    if base_host.lower() != next_host.lower():
+        logger.warning("Blocked Canvas pagination host mismatch: %s -> %s", base_host, next_host)
+        return None
+    try:
+        normalize_canvas_base_url(next_url.split("?", 1)[0])
+    except ValueError:
+        logger.warning("Blocked Canvas pagination URL failing allowlist: %s", next_url)
+        return None
+    return next_url
+
+
 def resolve_canvas_credentials(user_id: str, payload: dict):
     """
     Resolve Canvas credentials for a request.
-    In cloud mode we prefer server-stored credentials to avoid client-side override.
-    If none are stored yet, fall back to the provided payload so the user can connect
-    in-session (useful when credentials persistence is misconfigured).
+    Cloud mode: server-stored OAuth tokens only (auto-refresh). No client PAT override.
     """
     payload = payload or {}
-    payload_base_url = str(payload.get("base_url") or "").strip()
-    payload_token = str(payload.get("token") or "").strip()
 
     if USE_FIRESTORE:
-        creds = get_user_canvas_credentials(user_id) or {}
-        base_url = str(creds.get("api_url") or "").strip()
-        token = str(creds.get("token") or creds.get("encrypted_token") or "").strip()
+        from canvas_token_service import get_valid_canvas_credentials
 
-        if not base_url or not token:
-            # Fallback for first-time connect and for deployments where persistence fails.
-            base_url = payload_base_url
-            token = payload_token
-            if not base_url or not token:
-                return None, None, "No saved Canvas credentials. Reconnect Canvas."
+        creds = get_valid_canvas_credentials(user_id)
+        if not creds or not creds.get("token"):
+            return None, None, "No saved Canvas credentials. Sign in with Canvas OAuth."
+        base_url = str(creds.get("api_url") or "").strip()
+        token = str(creds.get("token") or "").strip()
     else:
-        base_url = payload_base_url
-        token = payload_token
+        base_url = str(payload.get("base_url") or "").strip()
+        token = str(payload.get("token") or "").strip()
 
     if not base_url or not token:
         return None, None, "Missing base_url or token"
@@ -1310,7 +1338,7 @@ def canvas_get_paginated_list(
         else:
             results.append(data)
         links = parse_canvas_link_header(resp.headers.get("Link"))
-        next_url = links.get("next")
+        next_url = _validate_pagination_next_url(links.get("next"), url)
         next_params = None  # next_url already includes query
 
     if next_url:
@@ -1503,7 +1531,7 @@ except ImportError:
     DEMO_USER_ID = "a0000000-0000-4000-8000-000000000001"
     DEMO_CREDENTIAL_KEY = "demo"
 
-    def is_demo_user(user_id):
+    def is_demo_user(user_id, is_demo=False):
         return False
 
     def get_demo_courses_payload():
@@ -1521,6 +1549,8 @@ if USE_FIRESTORE:
     @limiter.limit("30/minute")
     def demo_session():
         """Issue a demo JWT and course list (no Canvas OAuth required)."""
+        if _is_production and not ENABLE_DEMO_SESSION:
+            return jsonify({"error": "Demo session is disabled in production."}), 404
         from auth import create_demo_token
         from db_supabase import upsert_user_with_id
 
@@ -1576,7 +1606,8 @@ def get_current_user():
     return jsonify({
         "user_id": request.user_id,
         "email": getattr(request, 'user_email', None),
-        "name": getattr(request, 'user_name', None)
+        "name": getattr(request, 'user_name', None),
+        "canvas_instance_url": os.getenv("CANVAS_INSTANCE_URL", "").rstrip("/"),
     })
 
 
@@ -2071,6 +2102,11 @@ def get_cloud_cost_audit_api():
 def save_canvas_credentials():
     """Save Canvas credentials to Firestore for this user.
     Ties the Canvas token to the user's Google account."""
+    if USE_FIRESTORE:
+        return jsonify({
+            "error": "Manual Canvas tokens are disabled. Sign in with Canvas OAuth.",
+        }), 403
+
     payload = request.get_json(silent=True) or {}
     base_url_raw = str(payload.get("base_url") or "").strip()
     token = str(payload.get("token") or "").strip()
@@ -2159,6 +2195,29 @@ def update_user_preferences_api():
     return jsonify(updated)
 
 
+@app.route("/api/user/delete-data", methods=["POST"])
+@require_auth
+@limiter.limit("5/hour")
+def delete_user_data_api():
+    """Revoke Canvas tokens and delete all stored user data (GDPR-style erasure)."""
+    if not USE_FIRESTORE:
+        return jsonify({"error": "Not available in local mode."}), 400
+
+    from db_supabase import delete_all_user_data
+
+    user_id = request.user_id
+    if is_demo_user(user_id, getattr(request, "is_demo", False)):
+        return jsonify({"error": "Demo accounts cannot delete data."}), 400
+
+    try:
+        delete_all_user_data(user_id)
+    except Exception as exc:
+        logger.exception("delete-data failed for user %s: %s", user_id, exc)
+        return jsonify({"error": "Failed to delete user data."}), 500
+
+    return jsonify({"message": "All user data deleted."})
+
+
 # =============================================================================
 # CANVAS PASSTHROUGH APIs
 # =============================================================================
@@ -2168,16 +2227,24 @@ def update_user_preferences_api():
 @require_auth
 def test_canvas():
     payload = request.get_json(silent=True) or {}
-    base_url_raw = str(payload.get("base_url") or "").strip()
-    token = str(payload.get("token") or "").strip()
-
-    if not base_url_raw or not token:
-        return jsonify({"valid": False, "error": "Missing base_url or token"}), 400
-
-    try:
-        base_url = normalize_canvas_base_url(base_url_raw)
-    except ValueError as exc:
-        return jsonify({"valid": False, "error": f"Invalid base_url: {exc}"}), 400
+    if USE_FIRESTORE:
+        if str(payload.get("token") or "").strip():
+            return jsonify({
+                "valid": False,
+                "error": "Manual Canvas tokens are disabled. Sign in with Canvas OAuth.",
+            }), 403
+        base_url, token, error = resolve_canvas_credentials(request.user_id, payload)
+        if error:
+            return jsonify({"valid": False, "error": error}), 400
+    else:
+        base_url_raw = str(payload.get("base_url") or "").strip()
+        token = str(payload.get("token") or "").strip()
+        if not base_url_raw or not token:
+            return jsonify({"valid": False, "error": "Missing base_url or token"}), 400
+        try:
+            base_url = normalize_canvas_base_url(base_url_raw)
+        except ValueError as exc:
+            return jsonify({"valid": False, "error": f"Invalid base_url: {exc}"}), 400
 
     try:
         r = requests.get(
@@ -2924,6 +2991,18 @@ def sync_course_materials():
     active_credential_key = build_canvas_credential_key(base_url, token) if USE_FIRESTORE else None
 
     if USE_FIRESTORE:
+        from sync_throttle import check_sync_allowed
+
+        allowed, retry_after = check_sync_allowed(user_id)
+        if not allowed:
+            response = jsonify({
+                "error": "Please wait before syncing another course.",
+                "retry_after_seconds": retry_after,
+            })
+            response.status_code = 429
+            response.headers["Retry-After"] = str(retry_after)
+            return response
+
         rate_limit = consume_hourly_rate_limit(
             user_id=user_id,
             limit_key="course_sync",

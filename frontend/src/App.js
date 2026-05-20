@@ -9,6 +9,7 @@ import {
   initAuth,
   storeDemoSession,
   purgeDemoAuthArtifacts,
+  apiFetchOptions,
 } from './auth';
 import { API_BASE } from "./config";
 // Legacy firebase.js kept as reference; all auth now uses auth.js (Canvas OAuth)
@@ -119,7 +120,10 @@ async function fetchWithTimeout(resource, options = {}, timeoutMs = 8000) {
     );
   }, timeoutMs);
   try {
-    return await fetch(resource, { ...(options || {}), signal: controller.signal });
+    return await fetch(resource, {
+      ...apiFetchOptions(options || {}),
+      signal: controller.signal,
+    });
   } catch (err) {
     const isAbort = err?.name === "AbortError" || err?.name === "TimeoutError";
     if (isAbort) {
@@ -1253,7 +1257,7 @@ function App() {
       } else {
         // Fallback/background hydration when bootstrap payload is unavailable.
         void (async () => {
-          const assignmentsRes = await fetch(`${API_BASE}/api/user/assignments?lite=1`, {
+          const assignmentsRes = await fetchWithTimeout(`${API_BASE}/api/user/assignments?lite=1`, {
             headers: { "Authorization": `Bearer ${authToken}` }
           }).catch(err => {
             console.error(`Failed to fetch assignments from ${API_BASE}:`, err.message);
@@ -1278,7 +1282,7 @@ function App() {
         if (shouldRefresh) {
           // Refresh is best-effort: run it in the background so courses render immediately.
           void (async () => {
-            const refreshedCoursesRes = await fetch(`${API_BASE}/api/canvas/courses`, {
+            const refreshedCoursesRes = await fetchWithTimeout(`${API_BASE}/api/canvas/courses`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -1431,7 +1435,7 @@ function App() {
   useEffect(() => {
     if (isDemoMode) return;
     // Initialize Canvas OAuth auth (check for callback tokens in URL, restore session)
-    initAuth();
+    void initAuth();
 
     const unsubscribe = onAuthChange(async ({ user, token }) => {
       setFirebaseUser(user);
@@ -1492,7 +1496,7 @@ function App() {
                 return;
               }
 
-              const refreshRes = await fetch(`${API_BASE}/api/assignments/refresh-completion`, {
+              const refreshRes = await fetchWithTimeout(`${API_BASE}/api/assignments/refresh-completion`, {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -1829,7 +1833,7 @@ function App() {
       const authToken = await getAuthToken();
       if (!authToken) return;
 
-      const res = await fetch(`${API_BASE}/api/user/preferences`, {
+      const res = await fetchWithTimeout(`${API_BASE}/api/user/preferences`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -2355,7 +2359,7 @@ function App() {
         "Authorization": `Bearer ${authToken}`
       };
 
-      const testRes = await fetch(`${API_BASE}/api/canvas/test`, {
+      const testRes = await fetchWithTimeout(`${API_BASE}/api/canvas/test`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({ base_url: baseUrl, token }),
@@ -2369,7 +2373,7 @@ function App() {
       }
 
       // Save credentials to server (tied to Google account)
-      const saveCredsRes = await fetch(`${API_BASE}/api/user/canvas-credentials`, {
+      const saveCredsRes = await fetchWithTimeout(`${API_BASE}/api/user/canvas-credentials`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({ base_url: baseUrl, token }),
@@ -2393,7 +2397,7 @@ function App() {
 
       setCanvasStatus("Fetching courses...");
 
-      const courseRes = await fetch(`${API_BASE}/api/canvas/courses`, {
+      const courseRes = await fetchWithTimeout(`${API_BASE}/api/canvas/courses`, {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({ base_url: baseUrl, token }),

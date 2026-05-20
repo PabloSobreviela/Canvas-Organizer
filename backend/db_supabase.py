@@ -124,6 +124,20 @@ def build_canvas_credential_key(api_url: str, token: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def delete_all_user_data(user_id: str) -> None:
+    """
+    Revoke Canvas OAuth tokens and delete the user row (cascades to all child tables).
+    Also clears rate-limit buckets for this user.
+    """
+    from canvas_token_service import revoke_canvas_tokens
+
+    revoke_canvas_tokens(user_id)
+    db = get_db()
+    db.table("rate_limits").delete().eq("user_id", user_id).execute()
+    db.table("users").delete().eq("id", user_id).execute()
+    logger.info("Deleted all data for user %s", user_id)
+
+
 def init_db():
     """
     Initialize Supabase client + validate token encryption config.
