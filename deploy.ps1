@@ -36,7 +36,6 @@ param(
     [Parameter(Mandatory = $true)][string]$CanvasOAuthRedirectUri, # e.g. https://<backend>/api/auth/canvas/callback
     [string]$CanvasInstanceUrl = "https://gatech.instructure.com",
     [string]$SupabaseStorageBucket = "course-files",
-    [string]$DisclosedAiProviders = "openrouter,deepinfra",
     [string]$ModelName = "qwen/qwen3.5-flash-02-23",
     [string]$RateLimitStorageUri = "memory://",
 
@@ -100,7 +99,6 @@ $envVarsList = @(
     "CANVAS_OAUTH_REDIRECT_URI=$CanvasOAuthRedirectUri",
     "CANVAS_INSTANCE_URL=$CanvasInstanceUrl",
     "SUPABASE_STORAGE_BUCKET=$SupabaseStorageBucket",
-    "DISCLOSED_AI_PROVIDERS=$DisclosedAiProviders",
     "MODEL_NAME=$ModelName",
     "LLM_BASE_URL=https://openrouter.ai/api/v1",
     "OPENROUTER_PROVIDER_ONLY=deepinfra",
