@@ -9,8 +9,9 @@ export function ConsentModal({ onAccepted }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
-  async function handleContinue() {
-    if (!agreed) return;
+  async function handleContinue(event) {
+    event?.preventDefault();
+    if (!agreed || submitting) return;
     setSubmitting(true);
     setError("");
     try {
@@ -28,79 +29,110 @@ export function ConsentModal({ onAccepted }) {
       }
       onAccepted?.();
     } catch (err) {
-      setError(err?.message || "Could not save consent. Try again.");
+      setError(err?.message || "Could not save consent. Check your connection and try again.");
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4">
-      <div
+    <div className="mobile-consent-backdrop fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4">
+      <form
+        onSubmit={handleContinue}
         role="dialog"
         aria-labelledby="consent-title"
-        className="w-full max-w-lg rounded-lg border border-zinc-700 bg-zinc-950 p-6 shadow-xl"
+        aria-describedby="consent-summary"
+        className="mobile-consent-dialog w-full max-w-lg overflow-hidden rounded-lg border border-zinc-700 bg-zinc-950 shadow-xl"
       >
-        <h2 id="consent-title" className="text-lg font-semibold text-white">
-          Before you sync
-        </h2>
-        <p className="mt-2 text-sm text-zinc-400 leading-relaxed">
-          CanvasSync uses AI to find due dates in your course materials. Please review how we handle your data.
-        </p>
+        <div className="max-h-[calc(100vh-13rem)] overflow-y-auto p-5 sm:p-6">
+          <h2 id="consent-title" className="text-lg font-semibold text-white">
+            Before you sync
+          </h2>
+          <p id="consent-summary" className="mt-2 text-sm leading-relaxed text-zinc-400">
+            CanvasSync reads your Canvas course data to build a calendar and may use AI to find dates in course
+            materials when Canvas does not provide structured due dates.
+          </p>
 
-        <ul className="mt-4 space-y-2 text-sm text-zinc-300 list-disc pl-5">
-          <li>
-            We access Canvas with OAuth (read-only course data). We do not collect grades or submissions.
-          </li>
-          <li>
-            To resolve missing due dates, we send course text (syllabus excerpts, assignment titles, short
-            announcement snippets) to <strong className="text-zinc-100">OpenRouter</strong>. We do not send your
-            name or email in those requests.
-          </li>
-          <li>
-            OpenRouter input/output logging is <strong className="text-zinc-100">disabled</strong> on our
-            account. OpenRouter does not retain prompt content by default; we also request zero-data-retention
-            routing where supported.
-          </li>
-          <li>
-            <strong className="text-zinc-100">Content anonymity is not fully guaranteed:</strong> syllabi may
-            contain instructor names, emails, or other text. We redact common patterns before sending, but cannot
-            remove all identifying information.
-          </li>
-          <li>You can delete all stored data anytime from Settings (when available) or by contacting us.</li>
-        </ul>
+          <div className="mt-4 space-y-3 text-sm leading-relaxed text-zinc-300">
+            <section className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
+              <h3 className="text-sm font-medium text-zinc-100">Canvas access</h3>
+              <p className="mt-1 text-zinc-400">
+                We use read-only Canvas OAuth access for course calendars, assignments, modules, files,
+                announcements, and syllabus text. We do not write to Canvas, and we do not collect grades or
+                submissions.
+              </p>
+            </section>
 
-        <label className="mt-5 flex items-start gap-3 cursor-pointer text-sm text-zinc-300">
-          <input
-            type="checkbox"
-            checked={agreed}
-            onChange={(e) => setAgreed(e.target.checked)}
-            className="mt-1 rounded border-zinc-600"
-          />
-          <span>
-            I agree to the{" "}
-            <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
-              Terms of Service
-            </a>{" "}
-            and{" "}
-            <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
-              Privacy Policy
-            </a>
-            , and I understand how AI processing works as described above.
-          </span>
-        </label>
+            <section className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
+              <h3 className="text-sm font-medium text-zinc-100">AI processing</h3>
+              <p className="mt-1 text-zinc-400">
+                For missing dates, we send the minimum course text needed for extraction, such as syllabus excerpts,
+                assignment titles, and short announcement snippets. Requests go through{" "}
+                <strong className="text-zinc-100">OpenRouter</strong> and are pinned to{" "}
+                <strong className="text-zinc-100">DeepInfra</strong> with zero-data-retention required, data
+                collection denied, and provider fallback disabled. If that route is unavailable, the request should
+                fail instead of using another provider.
+              </p>
+            </section>
 
-        {error ? <p className="mt-3 text-sm text-red-400">{error}</p> : null}
+            <section className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
+              <h3 className="text-sm font-medium text-zinc-100">Privacy limits</h3>
+              <p className="mt-1 text-zinc-400">
+                We do not intentionally include your name, email, Canvas user ID, full prompts, or full AI
+                completions in stored AI logs. Course text is not guaranteed anonymous: syllabi and announcements can
+                contain instructor names, emails, student names, office locations, or other identifiers. We redact
+                common patterns before sending, but incidental identifying information may remain.
+              </p>
+            </section>
 
-        <button
-          type="button"
-          disabled={!agreed || submitting}
-          onClick={handleContinue}
-          className="mt-5 w-full rounded-md bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          {submitting ? "Saving…" : "Continue to CanvasSync"}
-        </button>
-      </div>
+            <section className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
+              <h3 className="text-sm font-medium text-zinc-100">Your controls</h3>
+              <p className="mt-1 text-zinc-400">
+                You can export or delete stored data from Settings, or by contacting us.
+              </p>
+            </section>
+          </div>
+        </div>
+
+        <div className="mobile-consent-actions border-t border-zinc-800 bg-zinc-950 p-4 sm:p-5">
+          <div className="flex items-start gap-3 text-sm text-zinc-300">
+            <input
+              id="legal-consent-checkbox"
+              type="checkbox"
+              checked={agreed}
+              onChange={(e) => setAgreed(e.target.checked)}
+              className="mt-1 h-4 w-4 rounded border-zinc-600"
+            />
+            <div>
+              <label htmlFor="legal-consent-checkbox" className="cursor-pointer">
+                I agree to the Terms of Service and Privacy Policy, and I understand the AI processing described
+                above.
+              </label>
+              <p className="mt-1 text-xs text-zinc-500">
+                Review the{" "}
+                <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
+                  Terms
+                </a>{" "}
+                and{" "}
+                <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
+                  Privacy Policy
+                </a>
+                .
+              </p>
+            </div>
+          </div>
+
+          {error ? <p role="alert" className="mt-3 text-sm text-red-400">{error}</p> : null}
+
+          <button
+            type="submit"
+            disabled={!agreed || submitting}
+            className="mt-4 w-full rounded-md bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {submitting ? "Saving..." : error ? "Try again" : "Continue to CanvasSync"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
