@@ -250,7 +250,7 @@ export function getCurrentUser() {
 }
 
 export function apiFetchOptions(extra = {}) {
-  const token = getStoredToken();
+  const token = getDemoToken() || getStoredToken();
   const headers = {
     ...(extra.headers || {}),
   };
