@@ -1,7 +1,7 @@
 # CanvasSync Post-Deployment Compliance Remainder
 
-**Date:** June 19, 2026  
-**Production release reviewed:** Git commit `a88dc2be01d243aa968bab09457b8563cf845d6a`  
+**Date:** June 19, 2026
+**Production release reviewed:** Git commit `a88dc2be01d243aa968bab09457b8563cf845d6a`
 **Overall status:** Critical containment fixes deployed; **not yet compliance-ready for general Georgia Tech student use**.
 
 > This is a technical compliance and deployment reconciliation, not legal advice or a Georgia Tech approval.
