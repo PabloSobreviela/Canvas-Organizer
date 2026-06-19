@@ -11,6 +11,10 @@ _OTEL_LOGGER = None
 
 # Fallback model pricing (USD per 1M tokens). Override with env vars.
 _DEFAULT_MODEL_PRICING_USD_PER_1M = {
+    # Production route (DeepInfra ZDR). See docs/OIT_READINESS_AUDIT.md (R6).
+    # OpenRouter resolves the 2507 slug to the dated alias `...-07-25`.
+    "qwen/qwen3-235b-a22b-2507": {"input": 0.071, "output": 0.10},
+    "qwen/qwen3-235b-a22b-07-25": {"input": 0.071, "output": 0.10},
     "qwen/qwen3.5-flash-02-23": {"input": 0.065, "output": 0.26},
     "qwen/qwen3.5-flash-20260224": {"input": 0.065, "output": 0.26},
     "qwen/qwen3-14b": {"input": 0.07, "output": 0.13},

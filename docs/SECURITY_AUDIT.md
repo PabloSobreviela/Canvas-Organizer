@@ -90,7 +90,7 @@ CanvasSync has meaningful baseline controls (Canvas URL allowlisting, Fernet tok
 |----|---------|----------|-------------|
 | S8 | Pagination `next` URL not re-validated | `app.py` `canvas_get_paginated_list` | Hostname allowlist check on `next_url` (implemented) |
 | S9 | DNS TOCTOU on SSRF check | `normalize_canvas_base_url` | Document risk; pin IP in future |
-| S10 | PAT fallback in cloud mode | `resolve_canvas_credentials` | Reject body token when `USE_FIRESTORE` (implemented) |
+| S10 | PAT fallback in cloud mode | `resolve_canvas_credentials` | Reject body token when `CLOUD_MODE` (implemented) |
 | S11 | AI logs dashboard default on | `ENABLE_AI_USAGE_LOGS_DASHBOARD` | Default `false`; allowlist required (implemented) |
 | S12 | Broad CORS `*.vercel.app` | `app.py` | Restrict in production via env |
 | S13 | Cloud Run `--allow-unauthenticated` | `scripts/deploy.ps1` | App-layer JWT/cookie auth only — document threat model |
@@ -110,7 +110,7 @@ CanvasSync has meaningful baseline controls (Canvas URL allowlisting, Fernet tok
 
 ## Positive controls
 
-- Cloud Run forces `USE_FIRESTORE=true` (auth enabled)
+- Production sets `APP_ENV=production` + `CLOUD_MODE=true` (auth enabled)
 - Canvas base URL SSRF checks (`normalize_canvas_base_url`)
 - Fernet encryption for stored tokens
 - API security headers (HSTS, CSP, X-Frame-Options)

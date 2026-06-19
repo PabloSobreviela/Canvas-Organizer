@@ -173,17 +173,10 @@ export default function PrivateTestingLogsPage() {
     setAuthorized(isAuthenticated());
   }, []);
 
-  if (!authorized) {
-    return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        <p className="text-sm text-zinc-400">Sign in required to view this page.</p>
-      </div>
-    );
-  }
-
   useEffect(() => {
+    if (!authorized) return;
     void loadLogs();
-  }, [loadLogs]);
+  }, [authorized, loadLogs]);
 
   const providerBreakdown = useMemo(() => {
     const map = new Map();
@@ -198,6 +191,14 @@ export default function PrivateTestingLogsPage() {
     }
     return Array.from(map.entries()).sort((a, b) => b[1].cost - a[1].cost);
   }, [logs]);
+
+  if (!authorized) {
+    return (
+      <div className="min-h-screen bg-black text-white flex items-center justify-center">
+        <p className="text-sm text-zinc-400">Sign in required to view this page.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-black text-white" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>

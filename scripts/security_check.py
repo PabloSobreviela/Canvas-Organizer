@@ -66,9 +66,6 @@ def main() -> int:
             for pattern, label in FORBIDDEN_PATTERNS:
                 if not pattern.search(content):
                     continue
-                # auth.js may read legacy localStorage during cookie migration only.
-                if label.startswith("localStorage") and path.name == "auth.js":
-                    continue
                 errors.append(f"{path}: {label}")
 
     if errors:

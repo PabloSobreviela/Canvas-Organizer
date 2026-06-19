@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -103,6 +104,85 @@ def _mock_canvas_assignments() -> List[Dict[str, Any]]:
         ]
     )
     return assignments
+
+
+def _fallback_due_for_demo_assignment(name: str) -> Optional[str]:
+    """Stable local-demo dates for UI review when no LLM key is configured."""
+    text = str(name or "").strip()
+    hw_match = re.search(r"\bHW\s+(\d{1,2})\b", text, re.IGNORECASE)
+    if hw_match:
+        index = int(hw_match.group(1))
+        day_offset = (index - 1) * 2
+        return f"2026-06-{15 + day_offset:02d}T23:59:00-04:00" if day_offset <= 14 else f"2026-07-{day_offset - 14:02d}T23:59:00-04:00"
+
+    quiz_match = re.search(r"\bQuiz\s+(\d{1,2})\b", text, re.IGNORECASE)
+    if quiz_match:
+        index = int(quiz_match.group(1))
+        quiz_days = {
+            1: "2026-06-18T10:00:00-04:00",
+            2: "2026-06-25T10:00:00-04:00",
+            3: "2026-07-02T10:00:00-04:00",
+            4: "2026-07-09T10:00:00-04:00",
+            5: "2026-07-16T10:00:00-04:00",
+        }
+        return quiz_days.get(index)
+
+    if text.lower() == "midterm 1":
+        return "2026-07-06T08:00:00-04:00"
+    if text.lower() == "midterm 2":
+        return "2026-07-24T08:00:00-04:00"
+    return None
+
+
+def resolve_demo_assignments_without_ai(
+    user_id: str,
+    course_id: str,
+    *,
+    now_iso: Callable[[], str],
+    get_course_assignments,
+    update_assignment,
+) -> Dict[str, Any]:
+    """Fill demo due dates without external AI so local /demo is always usable."""
+    rows = get_course_assignments(user_id, course_id, DEMO_CREDENTIAL_KEY)
+    updated = 0
+    conflicts = 0
+
+    for row in rows:
+        canvas_assignment_id = row.get("canvasAssignmentId")
+        if not canvas_assignment_id:
+            continue
+
+        name = row.get("name") or ""
+        due = _fallback_due_for_demo_assignment(name)
+        if not due:
+            conflicts += 1
+            continue
+
+        category = "EXAM" if re.search(r"\b(quiz|midterm|exam)\b", name, re.IGNORECASE) else "ASSIGNMENT"
+        update_assignment(
+            user_id,
+            course_id,
+            canvas_assignment_id,
+            {
+                "normalizedDueAt": due,
+                "status": "RESOLVED",
+                "category": category,
+                "deliverable": 1,
+            },
+            DEMO_CREDENTIAL_KEY,
+        )
+        updated += 1
+
+    return {
+        "course_id": course_id,
+        "timestamp": now_iso(),
+        "updated": updated,
+        "conflicts": conflicts,
+        "discovered": 0,
+        "is_resync": False,
+        "demo": True,
+        "fallback": "local-demo-no-llm",
+    }
 
 
 def sync_demo_course_materials(

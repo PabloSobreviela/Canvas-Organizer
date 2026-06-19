@@ -1,0 +1,32 @@
+name: Verify deploy (staging)
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_url:
+        description: Backend base URL (Cloud Run)
+        required: true
+      origin:
+        description: Allowed frontend origin
+        default: https://canvassync.app
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run verify_deploy.py
+        run: |
+          python backend/tools/verify_deploy.py "${{ github.event.inputs.backend_url }}" \
+            --origin "${{ github.event.inputs.origin }}" \
+            --json-out docs/verification/verify_deploy_results.json
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-deploy-results
+          path: docs/verification/verify_deploy_results.json

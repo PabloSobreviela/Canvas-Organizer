@@ -15,7 +15,7 @@
 | Canvas OAuth developer key registered | Approved key + scoped permissions on `gatech.instructure.com` |
 | Privacy & terms published | Public URLs linked in app and submission |
 | Data use documented & minimized | Written data inventory + code that enforces retention |
-| AI transparency | In-app consent + OpenRouter ZDR/no-logging guarantees + content de-identification |
+| AI transparency | In-app consent + OpenRouter to DeepInfra ZDR routing + honest best-effort redaction limits |
 | Security verified | Signed-off prod acceptance tests + incident contact |
 | Pilot proposal | Scope, duration, student count, rollback plan |
 | GT App path | Integration spec (link-out vs embedded; auth model) |
@@ -140,7 +140,7 @@ Per [OpenRouter data collection](https://openrouter.ai/docs/guides/privacy/data-
 - Prompts contain **course codes, assignment titles, syllabus/module text** — not student email, Canvas user id, or JWT.
 - Telemetry stores **token counts only** (`AI_LOG_MAX_PROMPT_CHARS=0`); no prompt/response persistence in Supabase.
 
-#### What CanvasSync must add (content de-identification)
+#### What CanvasSync must document clearly (content is not guaranteed anonymous)
 
 Syllabus PDFs often contain **instructor names, emails, GT IDs, office hours** — not linked to the requesting student, but still PII in the payload. OIT may treat this as “not anonymous” even if OpenRouter doesn’t store it.
 
@@ -155,7 +155,7 @@ Syllabus PDFs often contain **instructor names, emails, GT IDs, office hours** �
 3. **`backend/ai/llm_model.py`** — Pass OpenRouter privacy params on every call (see B6).
 4. **Never** send `user`, `user_id`, or session metadata in OpenRouter request bodies.
 
-**In-app consent (Phase C):** Explain that AI processing uses de-identified course materials via OpenRouter with zero prompt retention, not that AI is optional.
+**In-app consent (Phase C):** Explain that AI processing sends relevant course materials through OpenRouter to DeepInfra with ZDR required, after best-effort redaction. Do not describe the content as fully anonymous or fully de-identified.
 
 ---
 
@@ -236,14 +236,14 @@ AI remains **on** after consent. Consent documents *what* is sent and *how* Open
 ENABLE_AI_RESOLVE=true          # must stay true in production
 OPENROUTER_ENFORCE_ZDR=true     # per-request ZDR routing
 OPENROUTER_ALLOW_TRAINING=false   # require no-training providers
-OPENROUTER_ALLOW_FALLBACK=false   # action item: document fallback provider before enabling
+OPENROUTER_ALLOW_FALLBACK=false   # keep disabled; any future provider requires updated disclosure first
 ```
 
 **Code tasks:**
 
 1. Migration `004_user_ai_consent.sql` — `ai_consent_at` (required before first sync).
 2. **`backend/app.py`** — Block sync AI step until `ai_consent_at` is set.
-3. Consent copy references OpenRouter ZDR + de-identified course text.
+3. Consent copy references OpenRouter to DeepInfra ZDR routing and says redaction is best-effort, not guaranteed anonymity.
 
 **Acceptance:** No LLM call without recorded consent; every LLM call uses ZDR + sanitizer.
 
@@ -524,7 +524,7 @@ Document explicitly:
 
 | Risk | Mitigation |
 |------|------------|
-| OIT questions third-party AI | Lead with OpenRouter ZDR + de-identified prompts; offer DeepInfra disabled until documented |
+| OIT questions third-party AI | Lead with OpenRouter gateway + DeepInfra-only ZDR route, data collection denied, fallback disabled, and honest redaction limits |
 | Syllabus contains incidental PII | `prompt_sanitizer.py` + minimal announcement excerpt length |
 | FERPA questions on syllabus text | TTL + minimization + student-initiated delete |
 | Cookie auth fails in GT App WebView | Pilot via external browser; document SameSite=None |

@@ -1,9 +1,12 @@
 # Supabase Storage Module
 # Uses Supabase Storage for file uploads/downloads in multi-user deployment
 
+import logging
 import os
 from typing import Optional, List
 from supabase import create_client, Client
+
+logger = logging.getLogger(__name__)
 
 _supabase_client: Optional[Client] = None
 
@@ -75,13 +78,75 @@ def _storage_bucket():
     return get_supabase_client().storage.from_(BUCKET_NAME)
 
 
+def delete_storage_paths(paths: List[str]) -> int:
+    """
+    Delete one or more objects from Supabase Storage by full path within the bucket.
+    Returns the number of paths successfully removed.
+    """
+    if not paths:
+        return 0
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return 0
+    unique = list({p.strip() for p in paths if p and str(p).strip()})
+    if not unique:
+        return 0
+    try:
+        _storage_bucket().remove(unique)
+        return len(unique)
+    except Exception as e:
+        logger.warning("Bulk storage delete failed (%d paths): %s", len(unique), e)
+        deleted = 0
+        for path in unique:
+            try:
+                _storage_bucket().remove([path])
+                deleted += 1
+            except Exception:
+                pass
+        return deleted
+
+
+def delete_user_storage(user_id: str) -> int:
+    """
+    Remove all objects under {user_id}/ in the configured bucket.
+    Used on full account erasure and retention cleanup.
+    """
+    if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return 0
+
+    prefix = f"{user_id}/"
+    to_remove: List[str] = []
+
+    def _collect(folder: str):
+        try:
+            entries = _storage_bucket().list(folder)
+        except Exception as e:
+            logger.warning("Storage list failed for %s: %s", folder, e)
+            return
+        for entry in entries or []:
+            name = entry.get("name")
+            if not name:
+                continue
+            child = f"{folder}/{name}".replace("//", "/")
+            if entry.get("id"):
+                to_remove.append(child)
+            else:
+                _collect(child)
+
+    _collect(prefix.rstrip("/"))
+    if not to_remove:
+        return 0
+    removed = delete_storage_paths(to_remove)
+    logger.info("Deleted %d storage object(s) for user %s", removed, user_id)
+    return removed
+
+
 def upload_user_file(user_id: str, course_id: str, filename: str, file_content: bytes,
                      subfolder: str = "files") -> str:
     """
     Upload file to Supabase Storage under user's directory.
 
     Args:
-        user_id: Firebase user ID
+        user_id: Internal user UUID
         course_id: Canvas course ID
         filename: Name of the file
         file_content: File content as bytes

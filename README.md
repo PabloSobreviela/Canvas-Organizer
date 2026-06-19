@@ -1,27 +1,41 @@
 # CanvasSync
 
-A full-stack web application that unifies Canvas LMS assignments with AI-extracted deadlines from syllabi, modules, and course documents into a single weekly and calendar view.
+A full-stack web application that unifies Canvas LMS assignments with
+AI-extracted deadlines from syllabi, modules, and course documents into a single
+weekly and calendar view.
 
 ## The Problem
 
-Canvas LMS is the most widely used learning management system in higher education, but it scatters deadline information across multiple surfaces:
+Canvas LMS scatters deadline information across multiple surfaces:
 
-- **Assignments tab** only shows items the instructor explicitly created as Canvas assignments.
-- **Syllabus PDFs**, schedule spreadsheets, and other uploaded files often contain additional due dates that never appear in the assignments list.
-- **Module pages**, front pages, and announcements may reference deadlines in unstructured text.
+- **Assignments tab** only shows items the instructor explicitly created as
+  Canvas assignments.
+- **Syllabus PDFs**, schedule spreadsheets, and other uploaded files often
+  contain additional due dates that never appear in the assignments list.
+- **Module pages**, front pages, and announcements may reference deadlines in
+  unstructured text.
 
-Students end up checking multiple places per course, across multiple courses, and still miss work that was only mentioned in a document or module item. Canvas has no native way to consolidate all of these sources into one timeline.
+Students end up checking multiple places per course and still miss work that was
+only mentioned in a document. Canvas has no native way to consolidate all of
+these sources into one timeline.
 
 ## Key Features
 
-- **AI-powered date extraction** -- Uses Lambda Labs inference API (Qwen / Llama) to read syllabi, schedules, front pages, module items, and announcements, then extract and normalize due dates that Canvas itself does not surface.
-- **Unified weekly and calendar views** -- All assignments from all synced courses appear in a single timeline, whether they originated from the Canvas assignments API or were discovered by AI from course documents.
-- **Full Canvas API sync** -- Fetches courses, assignments (with submission status), announcements, modules, pages, files, and syllabus bodies through the Canvas REST API with paginated requests.
-- **Completion tracking** -- Combines Canvas submission state with a manual checklist so students can track progress from both sources.
-- **Google sign-in** -- Firebase Authentication with Google sign-in for cloud mode; data syncs across devices via Firestore.
-- **Per-course color coding** -- Assign colors and star courses for quick visual identification.
-- **Dark-themed responsive UI** -- Built with Material UI and Tailwind CSS with standard and vibrant color modes.
-- **Dual runtime modes** -- Cloud mode (Firestore + Firebase Auth + GCS) for production, and local mode (SQLite, no auth) for development.
+- **Canvas OAuth2 sign-in** — users connect their own Canvas account via OAuth2;
+  access/refresh tokens are encrypted at rest and refreshed automatically.
+- **AI-powered date extraction** — sends relevant course text, after best-effort
+  redaction of obvious identifiers, to an LLM via OpenRouter routed to DeepInfra
+  with ZDR required. Course text is not guaranteed anonymous. Independent course
+  groups resolve in parallel (default up to 10 concurrent LLM calls);
+  lecture/lab/recitation sections with the same class code share one merged
+  resolve pass.
+- **Unified weekly and calendar views** — all assignments from all synced courses
+  in one timeline, whether from the Canvas API or AI-discovered from documents.
+- **Completion tracking** — combines Canvas submission state with a manual
+  checklist.
+- **Privacy controls** — explicit legal consent before ingestion, plus in-app
+  data export and full data deletion.
+- **Dark-themed responsive UI** — React + Tailwind CSS.
 
 ## Architecture
 
@@ -31,44 +45,92 @@ flowchart LR
         React["React SPA"]
     end
 
-    subgraph backend [Backend]
+    subgraph backend [Backend - Cloud Run]
         Flask["Flask API"]
     end
 
-    subgraph google [Google Cloud]
-        Firestore["Firestore"]
-        GCS["Cloud Storage"]
-        LambdaAI["Lambda Labs\nInference API"]
+    subgraph supa [Supabase]
+        Postgres["Postgres + RLS"]
+        Storage["Supabase Storage"]
+    end
+
+    subgraph ai [AI]
+        OpenRouter["OpenRouter\n(ZDR routing)"]
     end
 
     subgraph external [External]
-        Canvas["Canvas LMS\nREST API"]
+        Canvas["Canvas LMS\nOAuth2 + REST API"]
     end
 
-    React -->|"Firebase ID token"| Flask
-    React -->|"Google sign-in"| FirebaseAuth["Firebase Auth"]
-    Flask -->|"verify token"| FirebaseAuth
-    Flask -->|"read/write user data"| Firestore
-    Flask -->|"store/retrieve files"| GCS
-    Flask -->|"date extraction\nprompts"| LambdaAI
-    Flask -->|"courses, assignments,\nfiles, modules"| Canvas
+    React -->|"session JWT (httpOnly)"| Flask
+    React -->|"Sign in with Canvas"| Canvas
+    Flask -->|"OAuth2 code exchange,\ntoken refresh/revoke"| Canvas
+    Flask -->|"courses, assignments,\nfiles, announcements"| Canvas
+    Flask -->|"read/write user data"| Postgres
+    Flask -->|"store/retrieve files"| Storage
+    Flask -->|"date extraction prompts\n(best-effort redaction)"| OpenRouter
 ```
 
-**Request flow:** The React frontend authenticates via Firebase (Google sign-in), then sends the Firebase ID token as a Bearer token on every API call. The Flask backend verifies the token, fetches or syncs data from the Canvas LMS API, stores it in Firestore, and optionally sends course documents to the Lambda Labs inference API for date extraction. Results are returned to the frontend for display in the weekly or calendar view.
+**Request flow:** The React frontend starts the Canvas OAuth2 flow. The Flask
+backend exchanges the authorization code for Canvas tokens, encrypts them
+(Fernet) and stores them in Supabase, then issues its own httpOnly session JWT.
+On each request the backend validates the session, refreshes the Canvas token if
+needed, syncs data from the Canvas REST API into Supabase, and (after the user
+has consented) sends relevant course text to OpenRouter for date extraction.
+OpenRouter routes the request to DeepInfra with ZDR required, data collection
+denied, and provider fallback disabled; best-effort redaction runs before the
+request, but free-text course materials are not guaranteed anonymous.
+Multi-course syncs run independent class-code groups in parallel
+(`AI_MAX_CONCURRENCY`, default 10); sections with the same course code (e.g.
+lecture + lab) stay grouped in a single LLM call and results fan out to each
+Canvas shell.
+
+## AI date resolution
+
+When resolving deadlines (`POST /api/resolve_course_dates`):
+
+1. **Group by class code** — courses sharing a normalized class code (lecture,
+   lab, recitation) are one work item with merged assignments, files, and
+   announcements (deduped across sections).
+2. **Parallel across groups** — up to `AI_MAX_CONCURRENCY` independent groups
+   run concurrently (default **10**). Total sync time stays closer to one LLM
+   wave instead of sequential per-course calls.
+3. **Fan out saves** — one LLM response updates all section shells in the
+   group; discovered items are written to every relevant course ID.
+4. **Partial failure** — a failed group does not abort the sync; successful
+   groups persist immediately. The API returns per-group and per-course status.
+
+Provider routing stays locked to DeepInfra via OpenRouter with ZDR required,
+data collection denied, and fallbacks disabled (`OPENROUTER_ALLOW_FALLBACK=false`).
+If the DeepInfra route does not satisfy the ZDR/data-policy constraints, the
+request fails instead of silently using another provider.
+
+Relevant env vars (see `backend/.env.template`): `MODEL_NAME`,
+`OPENROUTER_PROVIDER_ONLY`, `OPENROUTER_ENFORCE_ZDR`, `AI_MAX_CONCURRENCY`,
+`AI_TRANSIENT_MAX_RETRIES`.
+
+## Runtime modes
+
+Mode is determined by `backend/app_config.py` (the single source of truth):
+
+- **Cloud mode** (`APP_ENV=production`, or `CLOUD_MODE=true`): Supabase + Canvas
+  OAuth + enforced authentication. The only supported production mode.
+- **Local mode** (development default): single-user SQLite with **no auth** — for
+  development only. The app **fails closed** and refuses to start in this mode
+  when `APP_ENV=production`.
 
 ## Tech Stack
 
 | Layer | Technologies |
 |---|---|
-| **Frontend** | React 19, Material UI 7, Tailwind CSS 3.4, Firebase Auth, Day.js, Axios |
-| **Backend** | Python 3.11, Flask 3, Gunicorn, canvasapi |
-| **Database** | Firestore (cloud) / SQLite (local) |
-| **AI** | Lambda Labs -- Qwen 2.5 Coder 32B Instruct |
-| **Storage** | Google Cloud Storage |
-| **Auth** | Firebase Admin SDK, Fernet-encrypted Canvas tokens |
-| **Parsing** | pdfplumber, python-docx, openpyxl, BeautifulSoup, ics, feedparser |
-| **Infrastructure** | Google Cloud Run, Docker |
-| **Observability** | OpenTelemetry (AI usage telemetry) |
+| **Frontend** | React 19, Tailwind CSS, Day.js |
+| **Backend** | Python 3.11, Flask 3, Gunicorn, Flask-Limiter |
+| **Database** | Supabase (Postgres + RLS) — cloud; SQLite — local dev |
+| **AI** | OpenRouter → DeepInfra (ZDR-only, no provider fallback) |
+| **Storage** | Supabase Storage (local filesystem fallback in dev) |
+| **Auth** | Canvas OAuth2; httpOnly session JWTs; Fernet-encrypted Canvas tokens |
+| **Parsing** | pdfplumber, python-docx, openpyxl, BeautifulSoup |
+| **Infrastructure** | Google Cloud Run, Docker; frontend on Vercel |
 
 ## Project Structure
 
@@ -76,64 +138,53 @@ flowchart LR
 canvas-organizer/
 ├── backend/
 │   ├── app.py                  # Flask application and API routes
-│   ├── auth.py                 # Firebase token verification and auth decorators
-│   ├── db_firestore.py         # Firestore data access layer
-│   ├── db.py                   # SQLite data access layer (local mode)
-│   ├── storage.py              # Google Cloud Storage / local file storage
-│   ├── cloud_cost_audit.py     # BigQuery billing analytics
-│   ├── timezone_utils.py       # Timezone helpers
+│   ├── app_config.py           # Environment/mode detection (fail-closed)
+│   ├── auth.py                 # Canvas OAuth2, session JWTs, secret validation
+│   ├── canvas_token_service.py # Canvas token refresh/revoke lifecycle
+│   ├── db_supabase.py          # Supabase data access layer
+│   ├── db.py                   # SQLite data access layer (local dev mode)
+│   ├── retention_service.py    # Data retention enforcement
+│   ├── sync_throttle.py        # Distributed per-user sync spacing
+│   ├── storage.py              # Supabase Storage / local file storage
 │   ├── ai/
-│   │   ├── llm_model.py        # Lambda Labs LLM integration
-│   │   └── usage_telemetry.py  # Token/cost tracking with OpenTelemetry
-│   ├── parsers/
-│   │   ├── syllabus_text.py    # PDF and DOCX text extraction
-│   │   ├── calendar_parser.py  # ICS calendar parsing
-│   │   ├── rss_parser.py       # RSS/Atom feed parsing
-│   │   ├── canvas_files.py     # Canvas file download and classification
-│   │   ├── file_heuristic.py   # File type detection heuristics
-│   │   └── safe_download.py    # Secure file downloading
+│   │   ├── llm_model.py              # OpenRouter LLM integration (DeepInfra ZDR route)
+│   │   ├── parallel_course_resolve.py # Bounded parallel resolve across course groups
+│   │   ├── prompt_sanitizer.py       # Best-effort PII redaction before LLM calls
+│   │   └── usage_telemetry.py        # Token/cost tracking
+│   ├── parsers/                # PDF/DOCX/file extraction + safe download
+│   ├── migrations/             # SQL + data-repair migrations
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── .env.template
 ├── frontend/
 │   ├── src/
 │   │   ├── App.js              # Main application (views, state, UI)
-│   │   ├── api.js              # API client with auth headers
-│   │   ├── firebase.js         # Firebase Auth configuration
-│   │   ├── theme.js            # MUI theme customization
-│   │   └── index.js            # Entry point
-│   ├── public/
-│   ├── tailwind.config.js
-│   ├── package.json
+│   │   ├── auth.js             # Canvas OAuth session handling
+│   │   ├── api.js              # API client
+│   │   └── pages/, components/ # Legal pages, consent modal, etc.
 │   └── .env.template
-├── SECURITY.md
-└── .gitignore
+├── docs/                       # Audit, compliance, ops runbook, OIT package
+└── SECURITY.md
 ```
 
 ## Getting Started
 
 ### Prerequisites
 
-- Python 3.11+
-- Node.js and npm
-- A Canvas LMS account with an [API access token](https://community.canvaslms.com/t5/Admin-Guide/How-do-I-manage-API-access-tokens-as-an-admin/ta-p/89)
-
-For cloud mode only:
-- A Firebase project with Authentication (Google provider) enabled
-- A Lambda Labs API key for the inference endpoint
-- A GCP project with Cloud Storage APIs enabled
+- Python 3.11+, Node.js + npm
+- For cloud mode: a Supabase project, an OpenRouter API key, and a Canvas
+  Developer Key (OAuth2 client id/secret) for your institution's Canvas instance.
 
 ### Local Development
 
-Local mode runs with SQLite and no authentication, suitable for development and testing.
+Local mode runs with SQLite and no authentication (development only).
 
 **Backend:**
 
 ```bash
 cd backend
 cp .env.template .env
-# Edit .env -- ensure USE_FIRESTORE=false (the default)
-# Optionally set CANVAS_API_URL and CANVAS_API_TOKEN for local mode
+# Leave APP_ENV unset (defaults to development). CLOUD_MODE defaults to false.
 
 python -m venv venv
 source venv/bin/activate   # On Windows: venv\Scripts\activate
@@ -142,76 +193,54 @@ pip install -r requirements.txt
 python app.py
 ```
 
-The backend starts on `http://localhost:5000` by default.
+The backend starts on `http://localhost:5000`.
 
 **Frontend:**
 
 ```bash
 cd frontend
-cp .env.template .env.local
-# .env.template already sets REACT_APP_API_URL=http://localhost:5000
-
+cp .env.template .env.local   # sets REACT_APP_API_URL=http://localhost:5000
 npm install
 npm start
 ```
 
-The frontend starts on `http://localhost:3000` and proxies API calls to the backend.
-
 ### Cloud Deployment
 
-The backend is designed for Google Cloud Run. The included Dockerfile builds a production image:
+The backend targets Google Cloud Run. See `docs/OPS_RUNBOOK.md` for the full
+configuration matrix, secret rotation, retention, and incident response.
 
 ```bash
 cd backend
-docker build -t canvas-organizer-backend .
-docker run -p 8080:8080 \
-  -e CANVAS_TOKEN_ENCRYPTION_KEY=<your-fernet-key> \
-  canvas-organizer-backend
+docker build -t canvassync-backend .
 ```
 
-Generate a Fernet encryption key:
+Generate a Fernet encryption key for `CANVAS_TOKEN_ENCRYPTION_KEY`:
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-For a full cloud deployment, configure the environment variables listed in the next section and deploy to Cloud Run. The frontend can be deployed to Firebase Hosting or any static hosting provider after running `npm run build` with `REACT_APP_API_URL` set to the Cloud Run service URL.
+In production the backend **fails closed** unless all required configuration is
+present (see `validate_production_secrets` in `backend/auth.py` and the table in
+`docs/OPS_RUNBOOK.md`): `APP_ENV`, `SESSION_SECRET_KEY`,
+`CANVAS_TOKEN_ENCRYPTION_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`,
+`CANVAS_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI`, `FRONTEND_URL`, and
+`RATELIMIT_STORAGE_URI` (distributed store).
 
-## Environment Variables
+## Security & Privacy
 
-Both `.env.template` files document every variable with inline comments. The most important ones:
+See [SECURITY.md](SECURITY.md) and `docs/OIT_READINESS_AUDIT.md`. Key points:
 
-### Backend (`backend/.env.template`)
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `USE_FIRESTORE` | Yes | `false` | `true` for cloud mode (Firestore + Auth), `false` for local (SQLite) |
-| `CANVAS_TOKEN_ENCRYPTION_KEY` | Cloud mode | -- | Fernet key for encrypting stored Canvas API tokens |
-| `FIREBASE_PROJECT_ID` | Cloud mode | -- | Firebase project ID for token verification |
-| `FIREBASE_SERVICE_ACCOUNT` | Cloud mode | -- | Path to service account JSON (not needed on Cloud Run with ADC) |
-| `LAMBDA_API_KEY` | For AI | -- | Lambda Labs inference API key |
-| `GCP_PROJECT_ID` | For storage | -- | GCP project for Cloud Storage |
-| `GCS_BUCKET` | For file storage | `canvas-organizer-files` | Cloud Storage bucket name |
-| `MODEL_NAME` | No | `qwen-2.5-coder-32b-instruct` | LLM model name |
-| `PORT` | No | `5000` | Server port |
-| `CANVAS_API_URL` | Local mode | -- | Canvas instance URL for local development |
-| `CANVAS_API_TOKEN` | Local mode | -- | Canvas API token for local development |
-
-### Frontend (`frontend/.env.template`)
-
-| Variable | Required | Description |
-|---|---|---|
-| `REACT_APP_API_URL` | Yes | Backend API base URL |
-| `REACT_APP_FIREBASE_API_KEY` | Cloud mode | Firebase Web API key |
-| `REACT_APP_FIREBASE_AUTH_DOMAIN` | Cloud mode | Firebase Auth domain |
-| `REACT_APP_FIREBASE_PROJECT_ID` | Cloud mode | Firebase project ID |
-
-## Security
-
-See [SECURITY.md](SECURITY.md) for full guidelines. Key points:
-
-- **Canvas token encryption** -- Canvas API tokens are encrypted at rest using Fernet symmetric encryption before being stored in Firestore.
-- **No-auth local mode** -- Local mode disables authentication entirely and should never be exposed publicly.
-- **Rate limiting** -- Sync endpoints are rate-limited per user per hour to prevent abuse. Auth and credential endpoints have additional rate limits against brute force.
-- **Host validation** -- Canvas base URLs are validated against an allowlist (`*.instructure.com` by default) to prevent SSRF.
-- **Credential hygiene** -- `.env` files, service account keys, and secrets are gitignored. `.env.template` files serve as the committed reference.
+- **Canvas tokens encrypted at rest** with Fernet before storage in Supabase.
+- **Stable account-scoped data keys** (never derived from rotating tokens).
+- **Consent enforced at ingestion** — Canvas data is not stored until the user
+  has accepted the ToS / Privacy / AI disclosure.
+- **AI routing bound to disclosure** — data is only sent to providers listed in
+  `DISCLOSED_AI_PROVIDERS`; best-effort PII redaction runs first.
+- **Data minimization & retention** — raw Canvas payloads are not persisted in
+  production by default; time-based retention purges stored content.
+- **User data controls** — in-app export and full deletion (revokes Canvas
+  tokens and erases stored rows).
+- **SSRF protection** — Canvas hosts validated against an allowlist.
+- **Distributed rate limiting** — per-user sync spacing and hourly caps held in
+  a shared store across autoscaled instances.

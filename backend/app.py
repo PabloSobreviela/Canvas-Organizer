@@ -1,11 +1,12 @@
-# Canvas Organizer Backend - Cloud Version
+# CanvasSync Backend
 # ==========================================
-# This version supports both:
-# 1. CLOUD MODE: Multi-user with Firebase Auth + Firestore (production)
-# 2. LOCAL MODE: Single-user with SQLite (development/testing)
+# Supports two runtime modes (see backend/app_config.py for the single source
+# of truth on environment/mode detection):
+# 1. CLOUD MODE: Multi-user with Canvas OAuth + Supabase (production).
+# 2. LOCAL MODE: Single-user with SQLite, NO AUTH (development only).
 #
-# Set USE_FIRESTORE=true environment variable to enable cloud mode.
-# In local mode, no authentication is required and SQLite is used.
+# Mode is selected by app_config.CLOUD_MODE. Production (APP_ENV=production)
+# always runs in cloud mode and fails closed if cloud config is missing.
 
 import os
 import json
@@ -43,14 +44,18 @@ from fnmatch import fnmatch
 # Cloud Run cold starts are dominated by Python import time; keep the import graph
 # small for endpoints like /api/health and /api/canvas/courses.
 
-# Determine mode based on environment
-USE_FIRESTORE = os.getenv('USE_FIRESTORE', 'false').lower() == 'true'
-# Force cloud mode on Cloud Run (K_SERVICE); local mode has no auth.
-if os.getenv('K_SERVICE') and not USE_FIRESTORE:
-    USE_FIRESTORE = True
-    logger.info("Cloud Run detected: forcing USE_FIRESTORE=true (local mode has no auth)")
+# Determine mode based on environment (single source of truth: app_config).
+# CLOUD_MODE = Supabase + Canvas OAuth + enforced auth. Fails closed in prod.
+from app_config import (
+    CLOUD_MODE,
+    IS_PRODUCTION,
+    STORE_RAW_CANVAS_JSON,
+    RETENTION_CRON_SECRET,
+    describe as _describe_env,
+)
+logger.info("BOOT: %s", _describe_env())
 
-if USE_FIRESTORE:
+if CLOUD_MODE:
     # Cloud mode: Use Supabase + Canvas OAuth
     from db_supabase import (
         init_db, get_user, save_course, get_user_courses, 
@@ -62,7 +67,7 @@ if USE_FIRESTORE:
         save_syllabus_rules, get_syllabus_rules,
         get_reading_items, update_course_metadata, get_course,
         get_user_canvas_credentials, update_user_canvas_credentials,
-        build_canvas_credential_key,
+        build_canvas_account_key,
         consume_hourly_rate_limit,
         get_user_preferences, update_user_preferences,
         archive_course_file_texts, save_course_file_text_versioned,
@@ -83,10 +88,19 @@ else:
         from functools import wraps
         @wraps(f)
         def decorated(*args, **kwargs):
-            # In local mode, use a fixed dev user
-            request.user_id = "local-dev-user"
-            request.user_email = "dev@localhost"
-            request.user_name = "Local Developer"
+            # In local mode, use a fixed dev user. The local demo token lets
+            # /demo exercise the same in-memory demo pipeline without Supabase.
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header == "Bearer local-demo-token":
+                request.user_id = "a0000000-0000-4000-8000-000000000001"
+                request.user_email = "demo@canvassync.dev"
+                request.user_name = "Demo User"
+                request.is_demo = True
+            else:
+                request.user_id = "local-dev-user"
+                request.user_email = "dev@localhost"
+                request.user_name = "Local Developer"
+                request.is_demo = False
             return f(*args, **kwargs)
         return decorated
     
@@ -97,6 +111,38 @@ try:
     HAS_BS4 = True
 except ImportError:
     HAS_BS4 = False
+
+
+def require_consent(f):
+    """
+    Gate Canvas data *ingestion* on recorded legal consent (ToS + Privacy + AI
+    disclosure). Enforced at the ingestion boundary, not only at the AI step, so
+    we never store a user's Canvas data before they have consented. See R5.
+
+    Must be applied below @require_auth (it relies on request.user_id).
+    """
+    from functools import wraps
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Local dev mode has no auth/consent; demo sessions use synthetic data.
+        if not CLOUD_MODE or getattr(request, "is_demo", False):
+            return f(*args, **kwargs)
+        try:
+            from db_supabase import user_has_legal_consent
+            has_consent = user_has_legal_consent(request.user_id)
+        except Exception as exc:
+            logger.warning("Consent check failed for user %s: %s", getattr(request, "user_id", "?"), exc)
+            has_consent = False
+        if not has_consent:
+            return jsonify({
+                "error": "Legal consent required before syncing Canvas data.",
+                "code": "legal_consent_required",
+            }), 403
+        return f(*args, **kwargs)
+
+    return decorated
+
 
 import re
 
@@ -115,13 +161,12 @@ except (TypeError, ValueError):
     COURSE_SYNC_RATE_LIMIT_PER_HOUR = 300
 if COURSE_SYNC_RATE_LIMIT_PER_HOUR < 1:
     COURSE_SYNC_RATE_LIMIT_PER_HOUR = 1
-# Only allow rate limit relaxation in development (not on Cloud Run / K_SERVICE)
-_is_production = bool(os.getenv("K_SERVICE"))
+# Only allow rate limit relaxation in development (IS_PRODUCTION from app_config)
 _relax_requested = os.getenv("RELAX_SYNC_RATE_LIMITS_FOR_TESTING", "false").strip().lower() in {"1", "true", "yes", "on"}
-if _is_production and _relax_requested:
+if IS_PRODUCTION and _relax_requested:
     # Block: never honor RELAX_SYNC_RATE_LIMITS in production
     pass  # COURSE_SYNC_RATE_LIMIT_PER_HOUR stays at configured value
-elif not _is_production and _relax_requested:
+elif not IS_PRODUCTION and _relax_requested:
     COURSE_SYNC_RATE_LIMIT_PER_HOUR = max(COURSE_SYNC_RATE_LIMIT_PER_HOUR, 2000)
 
 try:
@@ -178,16 +223,12 @@ limiter = Limiter(
 # will block *all* API calls with "No 'Access-Control-Allow-Origin' header ...".
 
 _DEFAULT_ALLOWED_ORIGINS = [
-    "https://canvas-organizer-4437b.web.app",
-    "https://canvas-organizer-4437b.firebaseapp.com",
     "https://canvassync.app",
     "https://www.canvassync.app",
 ]
 
 # Vercel preview and production deployments
 _DEFAULT_ALLOWED_ORIGIN_PATTERNS = [
-    "https://canvas-organizer-4437b--*.web.app",
-    "https://canvas-organizer-4437b--*.firebaseapp.com",
     "https://canvassync.app",
     "https://www.canvassync.app",
 ]
@@ -218,11 +259,11 @@ def _env_truthy(name: str, default: bool = False) -> bool:
 
 
 # Default False in production; require explicit opt-in to avoid accidental exposure
-ENABLE_CLOUD_COST_AUDIT_ENDPOINT = _env_truthy("ENABLE_CLOUD_COST_AUDIT_ENDPOINT", default=not _is_production)
+ENABLE_CLOUD_COST_AUDIT_ENDPOINT = _env_truthy("ENABLE_CLOUD_COST_AUDIT_ENDPOINT", default=not IS_PRODUCTION)
 CLOUD_COST_ALLOWED_EMAILS = {email.lower() for email in _split_csv_env("CLOUD_COST_ALLOWED_EMAILS")}
 
 ENABLE_AI_USAGE_LOGS_DASHBOARD = _env_truthy("ENABLE_AI_USAGE_LOGS_DASHBOARD", default=False)
-ENABLE_DEMO_SESSION = _env_truthy("ENABLE_DEMO_SESSION", default=not _is_production)
+ENABLE_DEMO_SESSION = _env_truthy("ENABLE_DEMO_SESSION", default=not IS_PRODUCTION)
 AI_USAGE_LOGS_ALLOWED_EMAILS = {email.lower() for email in _split_csv_env("AI_USAGE_LOGS_ALLOWED_EMAILS")}
 
 try:
@@ -356,7 +397,7 @@ os.makedirs(STORAGE_ROOT, exist_ok=True)
 # NOTE: Avoid doing network initialization at import time in Cloud Run. If Firebase/ADC
 # init blocks (or the metadata server is unreachable), the revision can fail to become
 # ready and Cloud Run will return 503s without CORS headers (making debugging painful).
-if USE_FIRESTORE:
+if CLOUD_MODE:
     try:
         from auth import validate_production_secrets
         validate_production_secrets()
@@ -365,7 +406,7 @@ if USE_FIRESTORE:
     except Exception as exc:
         logger.error("BOOT: cloud init failed: %s", exc)
         raise
-elif not USE_FIRESTORE:
+elif not CLOUD_MODE:
     try:
         init_db()
     except Exception as exc:
@@ -427,14 +468,14 @@ def get_grouped_course_ids_by_code(
 ):
     """
     Return course ids that share the same normalized class code as the primary course.
-    Used to unify lecture/lab/studio sections (e.g., duplicate MATH 2552 sections)
-    so AI resolution operates on one merged context.
+    Used to resolve lecture/lab/studio sections (e.g., duplicate MATH 2552 sections)
+    together in one merged LLM call, then fan out results to each section shell.
     """
     primary_id = str(primary_course_id or "").strip()
     if not primary_id:
         return []
 
-    if not USE_FIRESTORE:
+    if not CLOUD_MODE:
         return [primary_id]
 
     try:
@@ -993,7 +1034,7 @@ def persist_ai_usage_log(
     if course_id and not payload.get("course_id"):
         payload["course_id"] = str(course_id)
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         try:
             save_ai_usage_log(user_id, payload, canvas_credential_key)
         except Exception as e:
@@ -1055,7 +1096,7 @@ def fetch_ai_usage_logs_for_user(
         limit_int = 50
     limit_int = max(1, min(limit_int, 200))
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         try:
             return get_ai_usage_logs(
                 user_id,
@@ -1229,30 +1270,36 @@ def resolve_canvas_credentials(user_id: str, payload: dict):
     """
     Resolve Canvas credentials for a request.
     Cloud mode: server-stored OAuth tokens only (auto-refresh). No client PAT override.
+
+    Returns a 4-tuple: (base_url, token, credential_key, error).
+    `credential_key` is the STABLE account-scoped key (never token-derived) used
+    to partition this user's stored data; it is None in local mode.
     """
     payload = payload or {}
+    credential_key = None
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         from canvas_token_service import get_valid_canvas_credentials
 
         creds = get_valid_canvas_credentials(user_id)
         if not creds or not creds.get("token"):
-            return None, None, "No saved Canvas credentials. Sign in with Canvas OAuth."
+            return None, None, None, "No saved Canvas credentials. Sign in with Canvas OAuth."
         base_url = str(creds.get("api_url") or "").strip()
         token = str(creds.get("token") or "").strip()
+        credential_key = creds.get("canvas_credential_key")
     else:
         base_url = str(payload.get("base_url") or "").strip()
         token = str(payload.get("token") or "").strip()
 
     if not base_url or not token:
-        return None, None, "Missing base_url or token"
+        return None, None, None, "Missing base_url or token"
 
     try:
         normalized_base_url = normalize_canvas_base_url(base_url)
     except ValueError as exc:
-        return None, None, f"Invalid base_url: {exc}"
+        return None, None, None, f"Invalid base_url: {exc}"
 
-    return normalized_base_url, token, None
+    return normalized_base_url, token, credential_key, None
 
 
 def get_canvas_download_url(base_url: str, headers: dict, file_id: int) -> str:
@@ -1526,6 +1573,7 @@ try:
         get_demo_courses_payload,
         sync_demo_course_materials,
         sync_demo_assignments,
+        resolve_demo_assignments_without_ai,
     )
 except ImportError:
     DEMO_USER_ID = "a0000000-0000-4000-8000-000000000001"
@@ -1543,16 +1591,36 @@ except ImportError:
     def sync_demo_assignments(*_args, **_kwargs):
         raise RuntimeError("Demo service unavailable")
 
+    def resolve_demo_assignments_without_ai(*_args, **_kwargs):
+        raise RuntimeError("Demo service unavailable")
 
-if USE_FIRESTORE:
-    @app.route("/api/demo/session", methods=["POST"])
-    @limiter.limit("30/minute")
-    def demo_session():
-        """Issue a demo JWT and course list (no Canvas OAuth required)."""
-        if _is_production and not ENABLE_DEMO_SESSION:
-            return jsonify({"error": "Demo session is disabled in production."}), 404
-        from auth import create_demo_token
+
+@app.route("/api/demo/session", methods=["POST"])
+@limiter.limit("30/minute")
+def demo_session():
+    """Issue a demo session and course list (no Canvas OAuth required)."""
+    if IS_PRODUCTION and not ENABLE_DEMO_SESSION:
+        return jsonify({"error": "Demo session is disabled in production."}), 404
+
+    body = {
+        "user": {
+            "uid": DEMO_USER_ID,
+            "email": "demo@canvassync.dev",
+            "displayName": "Demo User",
+        },
+        "courses": get_demo_courses_payload(),
+        "canvas_base_url": "https://gatech.instructure.com",
+    }
+
+    if CLOUD_MODE:
+        from auth import create_demo_token, set_session_cookie
         from db_supabase import upsert_user_with_id
+        from flask import make_response
+
+        try:
+            upsert_user_with_id(DEMO_USER_ID, "demo@canvassync.dev", "Demo User")
+        except Exception as exc:
+            logger.warning("Demo user upsert failed: %s", exc)
 
         token = create_demo_token(
             user_id=DEMO_USER_ID,
@@ -1562,25 +1630,17 @@ if USE_FIRESTORE:
         if not token:
             return jsonify({"error": "Demo mode is not configured on the server."}), 503
 
-        try:
-            upsert_user_with_id(DEMO_USER_ID, "demo@canvassync.dev", "Demo User")
-        except Exception as exc:
-            logger.warning("Demo user upsert failed: %s", exc)
+        body["token"] = token
+        resp = make_response(jsonify(body))
+        set_session_cookie(resp, token)
+        return resp
 
-        return jsonify({
-            "token": token,
-            "user": {
-                "uid": DEMO_USER_ID,
-                "email": "demo@canvassync.dev",
-                "displayName": "Demo User",
-            },
-            "courses": get_demo_courses_payload(),
-            "canvas_base_url": "https://gatech.instructure.com",
-        })
+    body["token"] = "local-demo-token"
+    return jsonify(body)
 
 
 # Canvas OAuth2 routes (only in cloud mode)
-if USE_FIRESTORE:
+if CLOUD_MODE:
     from auth import canvas_oauth_login, canvas_oauth_callback, canvas_oauth_logout
 
     @app.route("/api/auth/canvas/login", methods=["GET"])
@@ -1604,9 +1664,11 @@ if USE_FIRESTORE:
 def get_current_user():
     """Get current authenticated user info"""
     legal_consent_accepted = False
-    if USE_FIRESTORE:
+    legal_consent_current = False
+    if CLOUD_MODE:
         from db_supabase import user_has_legal_consent
         legal_consent_accepted = user_has_legal_consent(request.user_id)
+        legal_consent_current = legal_consent_accepted
 
     return jsonify({
         "user_id": request.user_id,
@@ -1614,6 +1676,7 @@ def get_current_user():
         "name": getattr(request, 'user_name', None),
         "canvas_instance_url": os.getenv("CANVAS_INSTANCE_URL", "").rstrip("/"),
         "legal_consent_accepted": legal_consent_accepted,
+        "legal_consent_current": legal_consent_current,
     })
 
 
@@ -1629,7 +1692,7 @@ def get_user_data():
         "no",
     )
     
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         creds = get_user_canvas_credentials(user_id)
         active_credential_key = creds.get('canvas_credential_key') if creds else None
 
@@ -1701,7 +1764,7 @@ def get_user_bootstrap():
         "no",
     )
 
-    if not USE_FIRESTORE:
+    if not CLOUD_MODE:
         return jsonify({
             "has_credentials": False,
             "base_url": None,
@@ -1783,7 +1846,7 @@ def get_user_courses_api():
     """
     user_id = request.user_id
 
-    if not USE_FIRESTORE:
+    if not CLOUD_MODE:
         return jsonify({
             "courses": [],
             "cached": False,
@@ -1816,19 +1879,55 @@ def get_user_assignments_api():
     """
     user_id = request.user_id
 
-    if not USE_FIRESTORE:
+    if is_demo_user(user_id, getattr(request, "is_demo", False)):
+        from demo_memory_store import get_course_assignments as demo_get_course_assignments, get_user_courses as demo_get_user_courses
+        courses = demo_get_user_courses(user_id, DEMO_CREDENTIAL_KEY)
+        assignments = []
+        for course in courses:
+            cid = str(course.get("canvasCourseId") or course.get("id") or "")
+            if cid:
+                assignments.extend(demo_get_course_assignments(user_id, cid, DEMO_CREDENTIAL_KEY))
+        lite = (request.args.get("lite") or "1").strip().lower() not in ("0", "false", "no")
+        if lite:
+            assignments = [
+                {k: v for k, v in a.items() if k not in ("description", "rawCanvasJson")}
+                for a in assignments
+            ]
+        return jsonify({"assignments": assignments, "cached": True, "demo": True})
+
+    if not CLOUD_MODE:
         return jsonify({
             "assignments": [],
             "cached": False,
         })
 
-    creds = get_user_canvas_credentials(user_id)
-    active_credential_key = creds.get('canvas_credential_key') if creds else None
+    active_credential_key = None
+    if getattr(request, "is_demo", False):
+        active_credential_key = DEMO_CREDENTIAL_KEY
+    else:
+        creds = get_user_canvas_credentials(user_id)
+        active_credential_key = creds.get('canvas_credential_key') if creds else None
     if not active_credential_key:
         return jsonify({
             "assignments": [],
             "cached": False,
         })
+
+    if active_credential_key == DEMO_CREDENTIAL_KEY:
+        from demo_memory_store import get_course_assignments as demo_get_course_assignments, get_user_courses as demo_get_user_courses
+        courses = demo_get_user_courses(user_id, active_credential_key)
+        assignments = []
+        for course in courses:
+            cid = str(course.get("canvasCourseId") or course.get("id") or "")
+            if cid:
+                assignments.extend(demo_get_course_assignments(user_id, cid, active_credential_key))
+        lite = (request.args.get("lite") or "1").strip().lower() not in ("0", "false", "no")
+        if lite:
+            assignments = [
+                {k: v for k, v in a.items() if k not in ("description", "rawCanvasJson")}
+                for a in assignments
+            ]
+        return jsonify({"assignments": assignments, "cached": True})
 
     lite = (request.args.get("lite") or "1").strip().lower() not in ("0", "false", "no")
     assignments = (
@@ -1879,7 +1978,7 @@ def get_ai_usage_logs_api():
     course_id = (request.args.get("course_id") or "").strip() or None
     active_credential_key = None
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         creds = get_user_canvas_credentials(user_id)
         active_credential_key = creds.get("canvas_credential_key") if creds else None
         if getattr(request, "is_demo", False):
@@ -1907,6 +2006,31 @@ def get_ai_usage_logs_api():
         "total_estimated_cost_usd": total_estimated_cost,
         "canvas_credential_key": active_credential_key,
     })
+
+
+@app.route("/api/admin/retention/run", methods=["POST"])
+@limiter.limit("12/hour")
+def run_retention_endpoint():
+    """
+    Cron-triggered retention enforcement. Authenticated by a shared secret in
+    the X-Retention-Secret header (set RETENTION_CRON_SECRET). Disabled when no
+    secret is configured. Prefer a scheduled Cloud Run Job in production.
+    """
+    if not CLOUD_MODE or not RETENTION_CRON_SECRET:
+        return jsonify({"error": "Not found"}), 404
+
+    import hmac
+    provided = request.headers.get("X-Retention-Secret") or ""
+    if not hmac.compare_digest(provided, RETENTION_CRON_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        from retention_service import run_retention
+        results = run_retention()
+        return jsonify({"status": "ok", "deleted": results})
+    except Exception as exc:
+        logger.error("Retention run failed: %s", exc)
+        return jsonify({"error": "Retention run failed"}), 500
 
 
 def _summarize_ai_usage_logs(logs: list) -> dict:
@@ -1951,7 +2075,7 @@ def get_ai_usage_logs_dashboard_api():
     if not ENABLE_AI_USAGE_LOGS_DASHBOARD:
         return jsonify({"error": "AI usage logs dashboard is disabled."}), 404
 
-    if _is_production and not AI_USAGE_LOGS_ALLOWED_EMAILS:
+    if IS_PRODUCTION and not AI_USAGE_LOGS_ALLOWED_EMAILS:
         return jsonify({
             "error": "AI usage logs dashboard access is not configured. Set AI_USAGE_LOGS_ALLOWED_EMAILS.",
         }), 403
@@ -1969,7 +2093,7 @@ def get_ai_usage_logs_dashboard_api():
 
     model_filter = (request.args.get("model") or "").strip() or None
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         try:
             logs = get_all_ai_usage_logs(limit=limit, model_filter=model_filter)
         except Exception as exc:
@@ -2108,7 +2232,7 @@ def get_cloud_cost_audit_api():
 def save_canvas_credentials():
     """Save Canvas credentials to Firestore for this user.
     Ties the Canvas token to the user's Google account."""
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         return jsonify({
             "error": "Manual Canvas tokens are disabled. Sign in with Canvas OAuth.",
         }), 403
@@ -2125,7 +2249,7 @@ def save_canvas_credentials():
     except ValueError as exc:
         return jsonify({"error": f"Invalid base_url: {exc}"}), 400
     
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         # Store in Firestore (token encryption handled in db layer).
         try:
             credential_key = update_user_canvas_credentials(request.user_id, base_url, token)
@@ -2142,7 +2266,7 @@ def save_canvas_credentials():
 @require_auth
 def get_canvas_credentials():
     """Get Canvas credentials from Firestore for this user."""
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         creds = get_user_canvas_credentials(request.user_id)
         if creds and creds.get('api_url'):
             try:
@@ -2162,7 +2286,7 @@ def get_canvas_credentials():
 @require_auth
 def get_user_preferences_api():
     """Get user UI preferences (course colors, starred courses, sync-enabled courses, completed items)."""
-    if not USE_FIRESTORE:
+    if not CLOUD_MODE:
         return jsonify({"courseColors": {}, "starredCourses": {}, "syncEnabledCourses": {}, "completedItems": {}})
 
     return jsonify(get_user_preferences(request.user_id))
@@ -2172,7 +2296,7 @@ def get_user_preferences_api():
 @require_auth
 def update_user_preferences_api():
     """Update user UI preferences (course colors, starred courses, sync-enabled courses, completed items)."""
-    if not USE_FIRESTORE:
+    if not CLOUD_MODE:
         return jsonify({"error": "Preferences are not available in local mode."}), 400
 
     payload = request.get_json(silent=True) or {}
@@ -2206,7 +2330,7 @@ def update_user_preferences_api():
 @limiter.limit("20/hour")
 def record_legal_consent_api():
     """Record acceptance of Terms, Privacy Policy, and AI processing disclosure."""
-    if not USE_FIRESTORE:
+    if not CLOUD_MODE:
         return jsonify({"success": True, "legal_consent_accepted": True})
 
     payload = request.get_json(silent=True) or {}
@@ -2222,7 +2346,13 @@ def record_legal_consent_api():
         )
     except Exception as exc:
         logger.exception("legal-consent failed for user %s: %s", request.user_id, exc)
-        return jsonify({"error": "Failed to record consent."}), 500
+        message = "Failed to record consent."
+        if not IS_PRODUCTION:
+            message = (
+                "Failed to record consent. Apply backend/migrations/004_user_legal_consent.sql "
+                "to the Supabase database, then try again."
+            )
+        return jsonify({"error": message}), 500
 
     return jsonify({
         "success": True,
@@ -2237,7 +2367,7 @@ def record_legal_consent_api():
 @limiter.limit("5/hour")
 def delete_user_data_api():
     """Revoke Canvas tokens and delete all stored user data (GDPR-style erasure)."""
-    if not USE_FIRESTORE:
+    if not CLOUD_MODE:
         return jsonify({"error": "Not available in local mode."}), 400
 
     from db_supabase import delete_all_user_data
@@ -2255,6 +2385,56 @@ def delete_user_data_api():
     return jsonify({"message": "All user data deleted."})
 
 
+@app.route("/api/user/export", methods=["GET"])
+@require_auth
+@limiter.limit("10/hour")
+def export_user_data_api():
+    """Data portability: return everything we store about the user as JSON."""
+    if not CLOUD_MODE:
+        return jsonify({"error": "Not available in local mode."}), 400
+
+    user_id = request.user_id
+    if is_demo_user(user_id, getattr(request, "is_demo", False)):
+        return jsonify({"error": "Demo accounts cannot export data."}), 400
+
+    try:
+        from db_supabase import export_all_user_data
+        data = export_all_user_data(user_id)
+    except Exception as exc:
+        logger.exception("export failed for user %s: %s", user_id, exc)
+        return jsonify({"error": "Failed to export user data."}), 500
+
+    resp = jsonify(data)
+    resp.headers["Content-Disposition"] = "attachment; filename=canvassync-export.json"
+    return resp
+
+
+@app.route("/api/user/disconnect-canvas", methods=["POST"])
+@require_auth
+@limiter.limit("10/hour")
+def disconnect_canvas_api():
+    """
+    Server-side Canvas disconnect: revoke the OAuth token at Canvas and clear
+    all stored Canvas credentials. Stored course data is retained (use
+    /api/user/delete-data for full erasure).
+    """
+    if not CLOUD_MODE:
+        return jsonify({"error": "Not available in local mode."}), 400
+
+    user_id = request.user_id
+    if is_demo_user(user_id, getattr(request, "is_demo", False)):
+        return jsonify({"error": "Demo accounts cannot disconnect Canvas."}), 400
+
+    try:
+        from canvas_token_service import revoke_canvas_tokens
+        revoke_canvas_tokens(user_id)
+    except Exception as exc:
+        logger.exception("disconnect-canvas failed for user %s: %s", user_id, exc)
+        return jsonify({"error": "Failed to disconnect Canvas."}), 500
+
+    return jsonify({"message": "Canvas disconnected. Stored credentials cleared."})
+
+
 # =============================================================================
 # CANVAS PASSTHROUGH APIs
 # =============================================================================
@@ -2262,15 +2442,16 @@ def delete_user_data_api():
 @app.route("/api/canvas/test", methods=["POST"])
 @limiter.limit("30/minute")
 @require_auth
+@require_consent
 def test_canvas():
     payload = request.get_json(silent=True) or {}
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         if str(payload.get("token") or "").strip():
             return jsonify({
                 "valid": False,
                 "error": "Manual Canvas tokens are disabled. Sign in with Canvas OAuth.",
             }), 403
-        base_url, token, error = resolve_canvas_credentials(request.user_id, payload)
+        base_url, token, active_credential_key, error = resolve_canvas_credentials(request.user_id, payload)
         if error:
             return jsonify({"valid": False, "error": error}), 400
     else:
@@ -2300,15 +2481,16 @@ def test_canvas():
 
 @app.route("/api/canvas/courses", methods=["POST"])
 @require_auth
+@require_consent
 def canvas_courses():
     payload = request.get_json(silent=True) or {}
     user_id = request.user_id
 
-    base_url, token, error = resolve_canvas_credentials(user_id, payload)
+    base_url, token, active_credential_key, error = resolve_canvas_credentials(user_id, payload)
     if error:
         return jsonify({"error": error}), 400
 
-    active_credential_key = build_canvas_credential_key(base_url, token) if USE_FIRESTORE else None
+    # active_credential_key resolved above as a stable account-scoped key (R2)
     cache_key = f"{user_id}:{active_credential_key}" if active_credential_key else None
     cached = _courses_cache_get(cache_key)
     if cached is not None:
@@ -2346,11 +2528,17 @@ def canvas_courses():
 
     for r in (active_res, invited_res, completed_res):
         if r.status_code != 200:
-            return jsonify({
+            # Do not echo upstream Canvas response bodies to clients in
+            # production (may contain identifiers / internal detail). See R4/F13.
+            error_body = {
                 "error": "Failed to fetch courses from Canvas",
                 "status": r.status_code,
-                "details": r.text[:500] if getattr(r, "text", None) else None,
-            }), 400
+            }
+            if not IS_PRODUCTION:
+                error_body["details"] = r.text[:500] if getattr(r, "text", None) else None
+            else:
+                logger.warning("Canvas courses fetch failed: HTTP %s", r.status_code)
+            return jsonify(error_body), 400
 
     courses_by_id = {}
     for c in (completed_res.json() or []):
@@ -2374,7 +2562,7 @@ def canvas_courses():
 
     courses = list(courses_by_id.values())
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         # Get AI overrides from Firestore
         user_courses = {
             str(c.get('canvasCourseId') or c.get('canvasCourseIdStr') or c.get('id')): c
@@ -2453,10 +2641,14 @@ def canvas_courses():
 
 @app.route("/api/sync_announcements", methods=["POST"])
 @require_auth
+@require_consent
 def sync_announcements():
     payload = request.get_json(silent=True) or {}
     course_ids = payload.get("course_ids") or []
     user_id = request.user_id
+
+    if is_demo_user(user_id, getattr(request, "is_demo", False)):
+        return jsonify({"announcements": [], "saved": 0, "demo": True})
 
     if not isinstance(course_ids, list) or not course_ids:
         return jsonify({"error": "Missing course_ids"}), 400
@@ -2465,11 +2657,11 @@ def sync_announcements():
     if not valid_course_ids:
         return jsonify({"error": "No valid course_ids"}), 400
 
-    base_url, token, error = resolve_canvas_credentials(user_id, payload)
+    base_url, token, active_credential_key, error = resolve_canvas_credentials(user_id, payload)
     if error:
         return jsonify({"error": error}), 400
 
-    active_credential_key = build_canvas_credential_key(base_url, token) if USE_FIRESTORE else None
+    # active_credential_key resolved above as a stable account-scoped key (R2)
 
     # Fetch per course: Canvas rejects the whole batch if any single context_code
     # lacks View Announcements permission.  Network errors must not crash the endpoint.
@@ -2512,7 +2704,7 @@ def sync_announcements():
 
     saved_count = 0
     save_errors = 0
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         for a in announcements:
             context_id = a.get("context_id")
             if not context_id and "context_code" in a:
@@ -2530,7 +2722,7 @@ def sync_announcements():
                     'title': a.get("title"),
                     'message': a.get("message"),
                     'posted_at': a.get("created_at") or a.get("posted_at"),
-                    'raw_json': json.dumps(a)
+                    'raw_json': json.dumps(a) if STORE_RAW_CANVAS_JSON else None
                 }, active_credential_key)
                 saved_count += 1
             except Exception as exc:
@@ -2581,7 +2773,7 @@ def sync_announcements():
 
 
 def get_all_announcements(course_id, user_id=None, canvas_credential_key=None):
-    if USE_FIRESTORE and user_id:
+    if CLOUD_MODE and user_id:
         announcements = get_course_announcements(user_id, course_id, canvas_credential_key)
         return [{
             'canvas_announcement_id': a.get('canvasAnnouncementId'),
@@ -2609,22 +2801,25 @@ def get_all_announcements(course_id, user_id=None, canvas_credential_key=None):
 
 @app.route("/api/sync_assignments", methods=["POST"])
 @require_auth
+@require_consent
 def sync_assignments():
     payload = request.get_json(silent=True) or {}
     course_id = str(payload.get("course_id") or "").strip()
     user_id = request.user_id
 
-    if USE_FIRESTORE and is_demo_user(user_id, getattr(request, "is_demo", False)):
+    if is_demo_user(user_id, getattr(request, "is_demo", False)):
         if not course_id:
             return jsonify({"error": "Missing course_id"}), 400
         try:
+            from demo_memory_store import demo_db_adapter
+            _demo_db = demo_db_adapter()
             summary = sync_demo_assignments(
                 user_id,
                 course_id,
                 now_iso=now_iso,
-                save_assignment=save_assignment,
-                get_course_assignments=get_course_assignments,
-                delete_discovered_assignments=delete_discovered_assignments,
+                save_assignment=_demo_db["save_assignment"],
+                get_course_assignments=_demo_db["get_course_assignments"],
+                delete_discovered_assignments=_demo_db["delete_discovered_assignments"],
             )
             return jsonify(summary)
         except ValueError as exc:
@@ -2633,14 +2828,14 @@ def sync_assignments():
             logger.exception("Demo assignment sync failed: %s", exc)
             return jsonify({"error": "Demo assignment sync failed"}), 500
 
-    base_url, token, error = resolve_canvas_credentials(user_id, payload)
+    base_url, token, active_credential_key, error = resolve_canvas_credentials(user_id, payload)
     if error:
         return jsonify({"error": error}), 400
 
     if not course_id:
         return jsonify({"error": "Missing course_id"}), 400
 
-    active_credential_key = build_canvas_credential_key(base_url, token) if USE_FIRESTORE else None
+    # active_credential_key resolved above as a stable account-scoped key (R2)
 
     try:
         assignments = canvas_get_paginated_list(
@@ -2673,7 +2868,7 @@ def sync_assignments():
         return jsonify({"error": detail}), status_code
     now = now_iso()
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         # Get course metadata for storing with assignments
         course_info = get_course(user_id, course_id, active_credential_key)
         course_name = course_info.get('courseName') if course_info else None
@@ -2713,7 +2908,7 @@ def sync_assignments():
                 'status': assignment_status,
                 'category': existing.get('category', 'PENDING') if existing else 'PENDING',
                 'deliverable': 1,
-                'raw_canvas_json': json.dumps(a, ensure_ascii=False),
+                'raw_canvas_json': json.dumps(a, ensure_ascii=False) if STORE_RAW_CANVAS_JSON else None,
                 'course_name': course_name,
                 'course_code': course_code,
             }
@@ -2844,6 +3039,7 @@ def sync_assignments():
 
 @app.route("/api/assignments/refresh-completion", methods=["POST"])
 @require_auth
+@require_consent
 def refresh_canvas_assignment_completion():
     """
     Lightweight reload watcher:
@@ -2853,11 +3049,11 @@ def refresh_canvas_assignment_completion():
     payload = request.get_json(silent=True) or {}
     user_id = request.user_id
 
-    base_url, token, error = resolve_canvas_credentials(user_id, payload)
+    base_url, token, active_credential_key, error = resolve_canvas_credentials(user_id, payload)
     if error:
         return jsonify({"error": error}), 400
 
-    active_credential_key = build_canvas_credential_key(base_url, token) if USE_FIRESTORE else None
+    # active_credential_key resolved above as a stable account-scoped key (R2)
 
     raw_course_ids = payload.get("course_ids")
     course_ids = []
@@ -2870,7 +3066,7 @@ def refresh_canvas_assignment_completion():
 
     # If caller doesn't pass course_ids, fall back to all known courses for this user scope.
     if not course_ids:
-        if USE_FIRESTORE:
+        if CLOUD_MODE:
             known_courses = get_user_courses(user_id, active_credential_key)
             for c in known_courses:
                 cid = str(c.get("canvasCourseIdStr") or c.get("canvasCourseId") or c.get("id") or "").strip()
@@ -2948,7 +3144,7 @@ def reading_items(course_id):
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         creds = get_user_canvas_credentials(user_id)
         active_credential_key = creds.get('canvas_credential_key') if creds else None
         items = get_reading_items(user_id, course_id, active_credential_key)
@@ -2984,25 +3180,28 @@ def reading_items(course_id):
 
 @app.route("/api/sync_course_materials", methods=["POST"])
 @require_auth
+@require_consent
 def sync_course_materials():
     payload = request.get_json(silent=True) or {}
     course_id = str(payload.get("course_id") or "").strip()
     user_id = request.user_id
 
-    if USE_FIRESTORE and is_demo_user(user_id, getattr(request, "is_demo", False)):
+    if is_demo_user(user_id, getattr(request, "is_demo", False)):
         if not course_id:
             return jsonify({"error": "Missing course_id"}), 400
         try:
+            from demo_memory_store import demo_db_adapter
+            _demo_db = demo_db_adapter()
             summary = sync_demo_course_materials(
                 user_id,
                 course_id,
                 now_iso=now_iso,
-                save_course=save_course,
-                save_course_file_text_versioned=save_course_file_text_versioned,
-                archive_course_file_texts=archive_course_file_texts,
-                get_course_sync_version=get_course_sync_version,
-                increment_course_sync_version=increment_course_sync_version,
-                cleanup_old_file_versions=cleanup_old_file_versions,
+                save_course=_demo_db["save_course"],
+                save_course_file_text_versioned=_demo_db["save_course_file_text_versioned"],
+                archive_course_file_texts=_demo_db["archive_course_file_texts"],
+                get_course_sync_version=_demo_db["get_course_sync_version"],
+                increment_course_sync_version=_demo_db["increment_course_sync_version"],
+                cleanup_old_file_versions=_demo_db["cleanup_old_file_versions"],
             )
             return jsonify(summary)
         except FileNotFoundError as exc:
@@ -3013,7 +3212,7 @@ def sync_course_materials():
             logger.exception("Demo materials sync failed: %s", exc)
             return jsonify({"error": "Demo materials sync failed"}), 500
 
-    base_url, token, error = resolve_canvas_credentials(user_id, payload)
+    base_url, token, active_credential_key, error = resolve_canvas_credentials(user_id, payload)
     if error:
         return jsonify({"error": error}), 400
 
@@ -3025,9 +3224,9 @@ def sync_course_materials():
     except ValueError as exc:
         return jsonify({"error": f"Invalid course_id: {exc}"}), 400
 
-    active_credential_key = build_canvas_credential_key(base_url, token) if USE_FIRESTORE else None
+    # active_credential_key resolved above as a stable account-scoped key (R2)
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         from sync_throttle import check_sync_allowed
 
         allowed, retry_after = check_sync_allowed(user_id)
@@ -3061,8 +3260,8 @@ def sync_course_materials():
     headers = canvas_headers(token)
     course_base, schedule_dir = make_course_storage_dir(
         course_id,
-        user_id=user_id if USE_FIRESTORE else None,
-        canvas_credential_key=active_credential_key if USE_FIRESTORE else None,
+        user_id=user_id if CLOUD_MODE else None,
+        canvas_credential_key=active_credential_key if CLOUD_MODE else None,
     )
 
     extracted_materials = []
@@ -3107,7 +3306,7 @@ def sync_course_materials():
     sync_version = 1
     file_types_to_version = ["schedule", "syllabus", "front_page", "modules"]
     
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         sync_version = get_course_sync_version(user_id, course_id, active_credential_key)
         existing_files_count = 0
         for ft in file_types_to_version:
@@ -3545,7 +3744,7 @@ def sync_course_materials():
     # STEP 6: Store in Database
     print(f"\n[SYNC 6/6] Storing {len(extracted_materials)} materials in database...")
 
-    if USE_FIRESTORE:
+    if CLOUD_MODE:
         # Use versioned save (previous files already archived above)
         for material in extracted_materials:
             save_course_file_text_versioned(user_id, course_id, {
@@ -3631,11 +3830,705 @@ def sync_course_materials():
 
 
 # =============================================================================
+# RESOLVE COURSE DATES (AI) — parallel across independent course groups
+# =============================================================================
+
+def _cluster_course_ids_into_groups(user_id, seed_course_ids, active_credential_key, primary_course_id=None):
+    """
+    Cluster requested course IDs into same-code groups (lecture + lab stay together).
+    Each group is one LLM work item; groups run in parallel up to AI_MAX_CONCURRENCY.
+    """
+    seeds = list(dict.fromkeys(str(c).strip() for c in (seed_course_ids or []) if str(c).strip()))
+    if not seeds:
+        return []
+
+    if not CLOUD_MODE:
+        return [[cid] for cid in seeds]
+
+    assigned = set()
+    groups = []
+    primary_id = str(primary_course_id or seeds[0]).strip()
+
+    for cid in seeds:
+        if cid in assigned:
+            continue
+        group = get_grouped_course_ids_by_code(user_id, cid, active_credential_key) or [cid]
+        group = list(dict.fromkeys(str(g).strip() for g in group if str(g).strip()))
+        if primary_id in group:
+            group = [primary_id] + [g for g in group if g != primary_id]
+        elif cid in group:
+            group = [cid] + [g for g in group if g != cid]
+        groups.append(group)
+        assigned.update(group)
+
+    return groups
+
+
+def _load_cloud_group_ai_context(user_id, group_course_ids, active_credential_key):
+    """Load merged assignments, files, and announcements for a same-code course group."""
+    grouped_course_ids = list(dict.fromkeys(str(c).strip() for c in (group_course_ids or []) if str(c).strip()))
+    if not grouped_course_ids:
+        raise ValueError("group_course_ids is empty")
+
+    if active_credential_key == DEMO_CREDENTIAL_KEY:
+        from demo_memory_store import (
+            get_course_assignments as get_assignments,
+            get_course_file_texts as get_file_texts,
+        )
+        list_announcements = lambda *_args, **_kwargs: []
+    else:
+        get_assignments = get_course_assignments
+        get_file_texts = get_course_file_texts
+        list_announcements = get_all_announcements
+
+    canvas_assignments = []
+    existing_discovered = []
+    existing_discovered_by_course = {}
+    canvas_semantics_by_course = {}
+    canvas_course_lookup = {}
+    seen_canvas_ids = set()
+    seen_discovered_keys = set()
+
+    for scoped_course_id in grouped_course_ids:
+        scoped_assignments = get_assignments(user_id, scoped_course_id, active_credential_key)
+
+        for a in scoped_assignments:
+            canvas_assignment_id = a.get("canvasAssignmentId")
+            if canvas_assignment_id:
+                scoped_course_id_str = str(scoped_course_id)
+                canvas_key = str(canvas_assignment_id)
+                if canvas_key in seen_canvas_ids:
+                    continue
+                seen_canvas_ids.add(canvas_key)
+                canvas_course_lookup[canvas_key] = scoped_course_id_str
+                canvas_assignments.append({
+                    "course_id": scoped_course_id_str,
+                    "canvas_assignment_id": canvas_assignment_id,
+                    "name": a.get("name"),
+                    "original_due_at": a.get("originalDueAt"),
+                    "normalized_due_at": a.get("normalizedDueAt"),
+                })
+                canvas_semantics_by_course.setdefault(scoped_course_id_str, []).append(
+                    build_assignment_semantic_signature(
+                        name=a.get("name"),
+                        due=a.get("normalizedDueAt") or a.get("originalDueAt"),
+                        category=a.get("category"),
+                        description=a.get("description"),
+                    )
+                )
+            else:
+                scoped_course_id_str = str(scoped_course_id)
+                discovered_doc_id = str(a.get("id") or "").strip()
+                discovered_key = build_discovered_item_dedupe_key(
+                    name=a.get("name"),
+                    due=a.get("normalizedDueAt"),
+                    category=a.get("category"),
+                    description=a.get("description"),
+                )
+                scoped_course_key_map = existing_discovered_by_course.setdefault(scoped_course_id_str, {})
+                existing_for_key = scoped_course_key_map.get(discovered_key) if discovered_key else None
+                if discovered_key and not existing_for_key:
+                    scoped_course_key_map[discovered_key] = {
+                        "id": discovered_doc_id,
+                        "name": a.get("name"),
+                        "normalized_due_at": a.get("normalizedDueAt"),
+                        "category": a.get("category"),
+                        "status": a.get("status"),
+                        "duplicate_doc_ids": [],
+                    }
+                elif discovered_key and existing_for_key and discovered_doc_id:
+                    primary_id = str(existing_for_key.get("id") or "").strip()
+                    if discovered_doc_id != primary_id:
+                        dup_ids = existing_for_key.setdefault("duplicate_doc_ids", [])
+                        if discovered_doc_id not in dup_ids:
+                            dup_ids.append(discovered_doc_id)
+                if discovered_key in seen_discovered_keys:
+                    continue
+                seen_discovered_keys.add(discovered_key)
+                existing_discovered.append({
+                    "name": a.get("name"),
+                    "normalized_due_at": a.get("normalizedDueAt"),
+                    "category": a.get("category"),
+                    "status": a.get("status"),
+                    "discovered_key": discovered_key,
+                })
+
+    assignments = [{
+        "canvas_assignment_id": a.get("canvas_assignment_id"),
+        "name": a.get("name"),
+        "original_due_at": a.get("original_due_at"),
+        "normalized_due_at": a.get("normalized_due_at"),
+    } for a in canvas_assignments]
+
+    file_types = ["schedule", "syllabus", "front_page", "modules"]
+    files_raw = []
+    seen_file_keys = set()
+    for scoped_course_id in grouped_course_ids:
+        for ft in file_types:
+            try:
+                scoped_files = get_file_texts(user_id, scoped_course_id, ft, active_credential_key)
+            except Exception:
+                continue
+            for f in scoped_files or []:
+                extracted_text = str(f.get("extractedText") or "")
+                file_key = (
+                    str(f.get("fileType") or ""),
+                    str(f.get("fileName") or ""),
+                    bool(f.get("isPrevious")),
+                    hashlib.md5(extracted_text.encode("utf-8", errors="ignore")).hexdigest()[:16],
+                )
+                if file_key in seen_file_keys:
+                    continue
+                seen_file_keys.add(file_key)
+                files_raw.append(f)
+
+    files_raw.sort(key=lambda f: len((f.get("extractedText") or "")), reverse=True)
+
+    new_files = [{
+        "file_name": f.get("fileName"),
+        "file_type": f.get("fileType"),
+        "extracted_text": f.get("extractedText"),
+    } for f in files_raw if not f.get("isPrevious")]
+
+    previous_files = [{
+        "file_name": f.get("fileName"),
+        "file_type": f.get("fileType"),
+        "extracted_text": f.get("extractedText"),
+    } for f in files_raw if f.get("isPrevious")]
+
+    files = new_files if new_files else [{
+        "file_name": f.get("fileName"),
+        "file_type": f.get("fileType"),
+        "extracted_text": f.get("extractedText"),
+    } for f in files_raw]
+
+    announcements = []
+    seen_announcement_keys = set()
+    for scoped_course_id in grouped_course_ids:
+        for ann in list_announcements(scoped_course_id, user_id, active_credential_key) or []:
+            ann_key = (
+                str(ann.get("canvas_announcement_id") or ""),
+                str(ann.get("title") or ""),
+                str(ann.get("posted_at") or ""),
+            )
+            if ann_key in seen_announcement_keys:
+                continue
+            seen_announcement_keys.add(ann_key)
+            announcements.append(ann)
+
+    is_resync = len(existing_discovered) > 0 or len(previous_files) > 0
+
+    return {
+        "group_course_ids": grouped_course_ids,
+        "canvas_assignments": canvas_assignments,
+        "assignments": assignments,
+        "existing_discovered": existing_discovered,
+        "existing_discovered_by_course": existing_discovered_by_course,
+        "canvas_semantics_by_course": canvas_semantics_by_course,
+        "canvas_course_lookup": canvas_course_lookup,
+        "files": files,
+        "new_files": new_files,
+        "previous_files": previous_files,
+        "announcements": announcements,
+        "is_resync": is_resync,
+    }
+
+
+def _load_local_course_ai_context(course_id):
+    """Load assignments, files, and announcements for one course (local SQLite)."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT canvas_assignment_id, name, original_due_at, normalized_due_at,
+               status, category, description
+        FROM assignments_normalized
+        WHERE course_id = ?
+    """, (course_id,))
+    assignments_raw = [dict(r) for r in cur.fetchall()]
+
+    canvas_assignments = [{
+        "canvas_assignment_id": a.get("canvas_assignment_id"),
+        "name": a.get("name"),
+        "description": html_to_text(a.get("description") or ""),
+        "original_due_at": a.get("original_due_at"),
+        "normalized_due_at": a.get("normalized_due_at"),
+    } for a in assignments_raw if a.get("canvas_assignment_id")]
+
+    existing_discovered = [{
+        "name": a.get("name"),
+        "description": html_to_text(a.get("description") or ""),
+        "normalized_due_at": a.get("normalized_due_at"),
+        "category": a.get("category"),
+        "status": a.get("status"),
+    } for a in assignments_raw if not a.get("canvas_assignment_id")]
+
+    deduped_existing_discovered = {}
+    for item in existing_discovered:
+        key = build_discovered_item_dedupe_key(
+            name=item.get("name"),
+            due=item.get("normalized_due_at"),
+            category=item.get("category"),
+            description=item.get("description"),
+        )
+        if key and key not in deduped_existing_discovered:
+            deduped_existing_discovered[key] = item
+    existing_discovered = list(deduped_existing_discovered.values())
+
+    cur.execute("""
+        SELECT file_name, file_type, extracted_text, is_previous
+        FROM course_file_text
+        WHERE course_id = ? AND file_type IN ('schedule', 'syllabus', 'front_page', 'modules')
+        ORDER BY LENGTH(extracted_text) DESC
+    """, (course_id,))
+    files_raw = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    new_files = [{
+        "file_name": f.get("file_name"),
+        "file_type": f.get("file_type"),
+        "extracted_text": f.get("extracted_text"),
+    } for f in files_raw if not f.get("is_previous")]
+
+    previous_files = [{
+        "file_name": f.get("file_name"),
+        "file_type": f.get("file_type"),
+        "extracted_text": f.get("extracted_text"),
+    } for f in files_raw if f.get("is_previous")]
+
+    files = new_files if new_files else [{
+        "file_name": f.get("file_name"),
+        "file_type": f.get("file_type"),
+        "extracted_text": f.get("extracted_text"),
+    } for f in files_raw]
+
+    announcements = get_all_announcements(course_id)
+    is_resync = len(existing_discovered) > 0 or len(previous_files) > 0
+
+    return {
+        "course_id": str(course_id),
+        "canvas_assignments": canvas_assignments,
+        "assignments": canvas_assignments,
+        "existing_discovered": existing_discovered,
+        "files": files,
+        "new_files": new_files,
+        "previous_files": previous_files,
+        "announcements": announcements,
+        "is_resync": is_resync,
+    }
+
+
+def _apply_cloud_group_ai_results(
+    user_id,
+    group_course_ids,
+    ai_resp,
+    ctx,
+    active_credential_key,
+    discover_new,
+):
+    """Persist LLM output for a course group; fan out discovered items to all section shells."""
+    if active_credential_key == DEMO_CREDENTIAL_KEY:
+        from demo_memory_store import (
+            update_assignment as apply_update_assignment,
+            save_assignment as apply_save_assignment,
+            delete_assignments_by_doc_ids as apply_delete_assignments_by_doc_ids,
+        )
+    else:
+        apply_update_assignment = update_assignment
+        apply_save_assignment = save_assignment
+        apply_delete_assignments_by_doc_ids = delete_assignments_by_doc_ids
+
+    grouped_course_ids = list(dict.fromkeys(str(c).strip() for c in (group_course_ids or []) if str(c).strip()))
+    primary_course_id = grouped_course_ids[0] if grouped_course_ids else ""
+    is_resync = ctx["is_resync"]
+    canvas_assignments = ctx["canvas_assignments"]
+    canvas_course_lookup = ctx["canvas_course_lookup"]
+    existing_discovered_by_course = ctx["existing_discovered_by_course"]
+    canvas_semantics_by_course = ctx["canvas_semantics_by_course"]
+
+    ai_results = ai_resp.get("a") or ai_resp.get("assignments", [])
+    canvas_updates = [r for r in ai_results if (r.get("cid") or r.get("canvas_assignment_id"))]
+    discovered_raw = [r for r in ai_results if not (r.get("cid") or r.get("canvas_assignment_id"))]
+    discovered = dedupe_discovered_ai_results(discovered_raw)
+    if len(discovered) < len(discovered_raw):
+        print(
+            f"[DEDUPE] Collapsed discovered AI rows from {len(discovered_raw)} to {len(discovered)} "
+            "using semantic keys."
+        )
+
+    updated = 0
+    conflicts = 0
+    discovered_count = 0
+
+    canvas_by_id = {str(a.get("canvas_assignment_id")): a for a in canvas_assignments}
+    for r in canvas_updates:
+        canvas_id = r.get("cid") or r.get("canvas_assignment_id")
+        if not canvas_id:
+            continue
+
+        st = r.get("st") or r.get("status")
+        ai_category = r.get("cat") or r.get("category") or "ASSIGNMENT"
+        due = r.get("due") or r.get("normalized_due_at")
+        deliverable = 0 if ai_category in ("READING", "ATTENDANCE", "PLACEHOLDER", "LECTURE") else 1
+
+        existing_canvas = canvas_by_id.get(str(canvas_id)) or {}
+        original_due_at = existing_canvas.get("original_due_at")
+        existing_normalized = existing_canvas.get("normalized_due_at")
+        due_to_set = original_due_at or due or existing_normalized
+
+        updates = {
+            "status": st,
+            "category": ai_category,
+            "deliverable": deliverable,
+        }
+        if due_to_set is not None:
+            updates["normalizedDueAt"] = due_to_set
+
+        target_course_id = str(
+            canvas_course_lookup.get(str(canvas_id))
+            or existing_canvas.get("course_id")
+            or primary_course_id
+        ).strip() or primary_course_id
+
+        apply_update_assignment(user_id, target_course_id, canvas_id, updates, active_credential_key)
+
+        if st == "RESOLVED":
+            updated += 1
+        elif st == "CONFLICT":
+            conflicts += 1
+
+    target_course_ids_for_discovered = grouped_course_ids if grouped_course_ids else [primary_course_id]
+    stale_discovered_doc_ids_by_course = {}
+    suppressed_discovered_against_canvas = 0
+
+    for scoped_course_id in target_course_ids_for_discovered:
+        scoped_course_id = str(scoped_course_id)
+        scoped_course_key_map = existing_discovered_by_course.get(scoped_course_id) or {}
+        if not scoped_course_key_map:
+            continue
+        canvas_signatures = canvas_semantics_by_course.get(scoped_course_id) or []
+        if not canvas_signatures:
+            continue
+
+        for discovered_key, existing_entry in list(scoped_course_key_map.items()):
+            if not discovered_matches_canvas(
+                name=existing_entry.get("name") or "",
+                due=existing_entry.get("normalized_due_at") or "",
+                category=existing_entry.get("category") or "",
+                description="",
+                canvas_signatures=canvas_signatures,
+            ):
+                continue
+
+            stale_ids = stale_discovered_doc_ids_by_course.setdefault(scoped_course_id, set())
+            primary_id = str(existing_entry.get("id") or "").strip()
+            if primary_id:
+                stale_ids.add(primary_id)
+            for dup_id in existing_entry.get("duplicate_doc_ids") or []:
+                dup_id = str(dup_id or "").strip()
+                if dup_id:
+                    stale_ids.add(dup_id)
+            scoped_course_key_map.pop(discovered_key, None)
+            suppressed_discovered_against_canvas += 1
+
+    if discovered:
+        if not is_resync:
+            for scoped_course_id in target_course_ids_for_discovered:
+                delete_discovered_assignments(user_id, scoped_course_id, active_credential_key)
+            print(
+                f"[INITIAL SYNC] Cleared discovered items for {len(target_course_ids_for_discovered)} "
+                f"course(s), adding {len(discovered)} new entries per course"
+            )
+        else:
+            print(
+                f"[RESYNC] Merging {len(discovered)} items across "
+                f"{len(target_course_ids_for_discovered)} grouped course(s)"
+            )
+
+        for r in discovered:
+            status = r.get("st") or r.get("status")
+            action = (r.get("action") or "").upper()
+            if status not in ("DISCOVERED", "EXISTING") and action not in ("KEEP", "UPDATE", "ADD"):
+                continue
+
+            name = (r.get("nam") or r.get("name") or "").strip()
+            desc = (r.get("des") or r.get("description") or "").strip()
+            due = r.get("due") or r.get("normalized_due_at")
+            if not name:
+                continue
+
+            force_assignment = force_assignment_if_deliverable_keywords(name, desc)
+            model_category = (r.get("cat") or r.get("category") or "").strip().upper()
+            if model_category == "QUIZ":
+                model_category = "EXAM"
+
+            if force_assignment:
+                category = "ASSIGNMENT"
+                deliverable = 1
+            elif model_category in ("ASSIGNMENT", "EXAM", "PLACEHOLDER"):
+                category = model_category
+                deliverable = 1 if category in ("ASSIGNMENT", "EXAM") else 0
+            else:
+                category, deliverable = infer_category_from_discovered_item(name, desc)
+
+            if not due:
+                if category == "EXAM":
+                    print(f"   [WARN] Keeping exam without date: {name}")
+                else:
+                    continue
+
+            discovered_key = build_discovered_item_dedupe_key(
+                name=name, due=due, category=category, description=desc,
+            )
+
+            if is_resync and action:
+                if action == "KEEP":
+                    print(f"   [KEEP] {category}: {name}")
+                elif action == "UPDATE":
+                    print(f"   [UPDATE] {category}: {name} - {r.get('reason', '')}")
+                elif action == "ADD":
+                    print(f"   + Adding {category}: {name}")
+
+            for scoped_course_id in target_course_ids_for_discovered:
+                scoped_course_id = str(scoped_course_id)
+                scoped_course_key_map = existing_discovered_by_course.setdefault(scoped_course_id, {})
+                existing_for_key = scoped_course_key_map.get(discovered_key) if discovered_key else None
+                existing_doc_id = str(existing_for_key.get("id") or "").strip() if existing_for_key else ""
+                canvas_signatures = canvas_semantics_by_course.get(scoped_course_id) or []
+
+                if discovered_matches_canvas(
+                    name=name, due=due, category=category, description=desc,
+                    canvas_signatures=canvas_signatures,
+                ):
+                    stale_ids = stale_discovered_doc_ids_by_course.setdefault(scoped_course_id, set())
+                    if existing_doc_id:
+                        stale_ids.add(existing_doc_id)
+                    if existing_for_key:
+                        for dup_id in existing_for_key.get("duplicate_doc_ids") or []:
+                            dup_id = str(dup_id or "").strip()
+                            if dup_id:
+                                stale_ids.add(dup_id)
+                        scoped_course_key_map.pop(discovered_key, None)
+                    suppressed_discovered_against_canvas += 1
+                    if is_resync:
+                        print(f"   [SKIP DUP-CANVAS] {category}: {name}")
+                    continue
+
+                if existing_for_key:
+                    stale_ids = stale_discovered_doc_ids_by_course.setdefault(scoped_course_id, set())
+                    for dup_id in existing_for_key.get("duplicate_doc_ids") or []:
+                        dup_id = str(dup_id or "").strip()
+                        if dup_id and dup_id != existing_doc_id:
+                            stale_ids.add(dup_id)
+
+                name_to_store = (existing_for_key.get("name") if existing_for_key else name) or name
+                saved_doc_id = apply_save_assignment(user_id, scoped_course_id, {
+                    "name": name_to_store,
+                    "description": desc or "Discovered from schedule",
+                    "normalized_due_at": due,
+                    "source_of_truth": "Schedule!",
+                    "status": "DISCOVERED",
+                    "category": category,
+                    "deliverable": deliverable,
+                    "existing_doc_id": existing_doc_id or None,
+                    "discovered_key": discovered_key,
+                    "raw_canvas_json": json.dumps({
+                        "discovered": True,
+                        "category": category,
+                        "action": action,
+                        "grouped_course_ids": target_course_ids_for_discovered,
+                    }),
+                }, active_credential_key)
+
+                if discovered_key:
+                    remaining_dup_ids = []
+                    if existing_for_key:
+                        remaining_dup_ids = [
+                            str(dup_id).strip()
+                            for dup_id in (existing_for_key.get("duplicate_doc_ids") or [])
+                            if str(dup_id).strip() and str(dup_id).strip() != str(saved_doc_id).strip()
+                        ]
+                    scoped_course_key_map[discovered_key] = {
+                        "id": saved_doc_id,
+                        "name": name_to_store,
+                        "normalized_due_at": due,
+                        "category": category,
+                        "status": "DISCOVERED",
+                        "duplicate_doc_ids": remaining_dup_ids,
+                    }
+                discovered_count += 1
+
+            if not is_resync or action == "ADD":
+                if len(target_course_ids_for_discovered) > 1:
+                    print(
+                        f"   [DISCOVERED] {category}: {name} due {due} "
+                        f"(applied to {len(target_course_ids_for_discovered)} courses)"
+                    )
+                else:
+                    print(f"   [DISCOVERED] {category}: {name} due {due}")
+
+    removed_discovered_duplicates = 0
+    for scoped_course_id, stale_ids in stale_discovered_doc_ids_by_course.items():
+        stale_list = [doc_id for doc_id in sorted(stale_ids) if doc_id]
+        if not stale_list:
+            continue
+        try:
+            removed_discovered_duplicates += apply_delete_assignments_by_doc_ids(
+                user_id, stale_list, active_credential_key,
+            )
+        except Exception as cleanup_err:
+            print(f"[WARN] Failed dedupe cleanup for course {scoped_course_id}: {cleanup_err}")
+    if removed_discovered_duplicates > 0:
+        print(f"[DEDUPE] Removed {removed_discovered_duplicates} stale discovered duplicate(s)")
+
+    ai_course_code = ai_resp.get("cc") or ai_resp.get("course_code")
+    if ai_course_code:
+        normalized_ai_code = normalize_course_code(ai_course_code)
+        for scoped_course_id in grouped_course_ids:
+            existing_course = get_course(user_id, scoped_course_id, active_credential_key)
+            existing_course_code = normalize_course_code(
+                existing_course.get("courseCode") if existing_course else ""
+            )
+            if normalized_ai_code and (
+                not existing_course_code
+                or existing_course_code == "UNK"
+                or existing_course_code == normalized_ai_code
+            ):
+                update_course_metadata(user_id, scoped_course_id, normalized_ai_code, active_credential_key)
+
+    return {
+        "updated": updated,
+        "conflicts": conflicts,
+        "discovered": discovered_count,
+        "is_resync": is_resync,
+        "changes_summary": ai_resp.get("changes_summary") if is_resync else None,
+        "course_code": ai_course_code,
+        "suppressed_discovered_against_canvas": suppressed_discovered_against_canvas,
+    }
+
+
+def _apply_local_course_ai_results(course_id, ai_resp, ctx, discover_new):
+    """Persist LLM output for a single course (local SQLite)."""
+    is_resync = ctx["is_resync"]
+    ai_results = ai_resp.get("a") or ai_resp.get("assignments", [])
+    canvas_updates = [r for r in ai_results if (r.get("cid") or r.get("canvas_assignment_id"))]
+    discovered_raw = [r for r in ai_results if not (r.get("cid") or r.get("canvas_assignment_id"))]
+    discovered = dedupe_discovered_ai_results(discovered_raw)
+
+    updated = 0
+    conflicts = 0
+    discovered_count = 0
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    for r in canvas_updates:
+        canvas_id = r.get("cid") or r.get("canvas_assignment_id")
+        if not canvas_id:
+            continue
+        st = r.get("st") or r.get("status")
+        ai_category = r.get("cat") or r.get("category") or "ASSIGNMENT"
+        due = r.get("due") or r.get("normalized_due_at")
+        deliverable = 0 if ai_category in ("READING", "ATTENDANCE", "PLACEHOLDER", "LECTURE") else 1
+        cur.execute("""
+            UPDATE assignments_normalized
+            SET normalized_due_at = ?, status = ?, category = ?, deliverable = ?
+            WHERE course_id = ? AND canvas_assignment_id = ?
+        """, (due, st, ai_category, deliverable, course_id, canvas_id))
+        if st == "RESOLVED":
+            updated += 1
+        elif st == "CONFLICT":
+            conflicts += 1
+
+    if discovered:
+        if not is_resync:
+            cur.execute("""
+                DELETE FROM assignments_normalized
+                WHERE course_id = ? AND canvas_assignment_id IS NULL
+            """, (course_id,))
+        for r in discovered:
+            status = r.get("st") or r.get("status")
+            action = (r.get("action") or ("KEEP" if is_resync else "")).upper()
+            if action == "REMOVE":
+                continue
+            if status not in ("DISCOVERED", "EXISTING") and action not in ("KEEP", "UPDATE", "ADD"):
+                continue
+            name = (r.get("nam") or r.get("name") or "").strip()
+            desc = (r.get("des") or r.get("description") or "").strip()
+            due = r.get("due") or r.get("normalized_due_at")
+            if not name:
+                continue
+            force_assignment = force_assignment_if_deliverable_keywords(name, desc)
+            model_category = (r.get("cat") or r.get("category") or "").strip().upper()
+            if model_category == "QUIZ":
+                model_category = "EXAM"
+            if force_assignment:
+                category = "ASSIGNMENT"
+                deliverable = 1
+            elif model_category in ("ASSIGNMENT", "EXAM", "PLACEHOLDER"):
+                category = model_category
+                deliverable = 1 if category in ("ASSIGNMENT", "EXAM") else 0
+            else:
+                category, deliverable = infer_category_from_discovered_item(name, desc)
+            if not due and category != "EXAM":
+                continue
+            raw_meta = json.dumps({"discovered": True, "category": category, "action": action})
+            if is_resync and action in ("KEEP", "UPDATE"):
+                cur.execute("""
+                    UPDATE assignments_normalized
+                    SET description = ?, normalized_due_at = ?, status = ?, category = ?,
+                        deliverable = ?, raw_canvas_json = ?, updated_at = ?
+                    WHERE course_id = ? AND canvas_assignment_id IS NULL AND name = ?
+                """, (
+                    desc or "Discovered from schedule", due, "DISCOVERED", category,
+                    deliverable, raw_meta, now_iso(), course_id, name,
+                ))
+                if cur.rowcount == 0:
+                    cur.execute("""
+                        INSERT INTO assignments_normalized (
+                            course_id, canvas_assignment_id, name, description,
+                            original_due_at, normalized_due_at, source_of_truth,
+                            confidence, status, raw_canvas_json, category,
+                            deliverable, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        course_id, None, name, desc or "Discovered from schedule",
+                        None, due, "Schedule!", None, "DISCOVERED", raw_meta,
+                        category, deliverable, now_iso(), now_iso(),
+                    ))
+            else:
+                cur.execute("""
+                    INSERT INTO assignments_normalized (
+                        course_id, canvas_assignment_id, name, description,
+                        original_due_at, normalized_due_at, source_of_truth,
+                        confidence, status, raw_canvas_json, category,
+                        deliverable, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    course_id, None, name, desc or "Discovered from schedule",
+                    None, due, "Schedule!", None, "DISCOVERED", raw_meta,
+                    category, deliverable, now_iso(), now_iso(),
+                ))
+            discovered_count += 1
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "updated": updated,
+        "conflicts": conflicts,
+        "discovered": discovered_count,
+        "is_resync": is_resync,
+        "changes_summary": ai_resp.get("changes_summary") if is_resync else None,
+    }
+
+
+# =============================================================================
 # RESOLVE COURSE DATES (AI)
 # =============================================================================
 
 @app.route("/api/resolve_course_dates", methods=["POST"])
 @require_auth
+@require_consent
 def resolve_course_dates():
     payload = request.get_json(silent=True) or {}
     course_id = str(payload.get("course_id") or "").strip()
@@ -3645,7 +4538,7 @@ def resolve_course_dates():
     if not course_id:
         return jsonify({"error": "Missing course_id"}), 400
 
-    if USE_FIRESTORE and not is_demo_user(user_id, getattr(request, "is_demo", False)):
+    if CLOUD_MODE and not is_demo_user(user_id, getattr(request, "is_demo", False)):
         from db_supabase import user_has_legal_consent
         if not user_has_legal_consent(user_id):
             return jsonify({
@@ -3654,327 +4547,219 @@ def resolve_course_dates():
             }), 403
 
     active_credential_key = None
-    if USE_FIRESTORE:
-        if is_demo_user(user_id, getattr(request, "is_demo", False)):
-            active_credential_key = DEMO_CREDENTIAL_KEY
-        else:
-            creds = get_user_canvas_credentials(user_id)
-            active_credential_key = creds.get('canvas_credential_key') if creds else None
+    if is_demo_user(user_id, getattr(request, "is_demo", False)):
+        active_credential_key = DEMO_CREDENTIAL_KEY
+    elif CLOUD_MODE:
+        creds = get_user_canvas_credentials(user_id)
+        active_credential_key = creds.get('canvas_credential_key') if creds else None
 
-    grouped_course_ids = [course_id]
-    canvas_course_lookup = {}
+    # Cluster into same-code groups; each group gets one merged LLM call.
+    raw_course_ids = payload.get("course_ids")
+    seed_course_ids = [course_id]
+    if isinstance(raw_course_ids, list):
+        explicit = list(dict.fromkeys(str(cid).strip() for cid in raw_course_ids if str(cid).strip()))
+        if explicit:
+            seed_course_ids = explicit
 
-    if USE_FIRESTORE:
-        grouped_course_ids = get_grouped_course_ids_by_code(user_id, course_id, active_credential_key) or [course_id]
-        print(f"[GROUP SYNC] Resolve scope for {course_id}: {grouped_course_ids}")
+    course_groups = _cluster_course_ids_into_groups(
+        user_id, seed_course_ids, active_credential_key, primary_course_id=course_id,
+    )
+    if not course_groups:
+        return jsonify({"error": "No courses to resolve"}), 400
 
-        # Get all assignments from Firestore (including discovered)
-        assignments_raw = []
-        canvas_semantics_by_course = {}
+    grouped_course_ids = (
+        get_grouped_course_ids_by_code(user_id, course_id, active_credential_key) or [course_id]
+        if CLOUD_MODE and active_credential_key != DEMO_CREDENTIAL_KEY else [course_id]
+    )
+    all_course_ids = list(dict.fromkeys(cid for group in course_groups for cid in group))
 
-        # Separate Canvas assignments from discovered ones
-        canvas_assignments = []
-        existing_discovered = []
-        existing_discovered_by_course = {}
-        seen_canvas_ids = set()
-        seen_discovered_keys = set()
-
-        for scoped_course_id in grouped_course_ids:
-            scoped_assignments = get_course_assignments(user_id, scoped_course_id, active_credential_key)
-            assignments_raw.extend(scoped_assignments)
-
-            for a in scoped_assignments:
-                canvas_assignment_id = a.get('canvasAssignmentId')
-                if canvas_assignment_id:
-                    scoped_course_id_str = str(scoped_course_id)
-                    canvas_key = str(canvas_assignment_id)
-                    if canvas_key in seen_canvas_ids:
-                        continue
-                    seen_canvas_ids.add(canvas_key)
-                    canvas_course_lookup[canvas_key] = scoped_course_id_str
-                    canvas_assignments.append({
-                        'course_id': scoped_course_id_str,
-                        'canvas_assignment_id': canvas_assignment_id,
-                        'name': a.get('name'),
-                        'original_due_at': a.get('originalDueAt'),
-                        'normalized_due_at': a.get('normalizedDueAt')
-                    })
-                    canvas_semantics_by_course.setdefault(scoped_course_id_str, []).append(
-                        build_assignment_semantic_signature(
-                            name=a.get("name"),
-                            due=a.get("normalizedDueAt") or a.get("originalDueAt"),
-                            category=a.get("category"),
-                            description=a.get("description"),
-                        )
-                    )
-                else:
-                    scoped_course_id_str = str(scoped_course_id)
-                    discovered_doc_id = str(a.get("id") or "").strip()
-                    discovered_key = build_discovered_item_dedupe_key(
-                        name=a.get("name"),
-                        due=a.get("normalizedDueAt"),
-                        category=a.get("category"),
-                        description=a.get("description"),
-                    )
-                    scoped_course_key_map = existing_discovered_by_course.setdefault(scoped_course_id_str, {})
-                    existing_for_key = scoped_course_key_map.get(discovered_key) if discovered_key else None
-                    if discovered_key and not existing_for_key:
-                        scoped_course_key_map[discovered_key] = {
-                            "id": discovered_doc_id,
-                            "name": a.get("name"),
-                            "normalized_due_at": a.get("normalizedDueAt"),
-                            "category": a.get("category"),
-                            "status": a.get("status"),
-                            "duplicate_doc_ids": [],
-                        }
-                    elif discovered_key and existing_for_key and discovered_doc_id:
-                        primary_id = str(existing_for_key.get("id") or "").strip()
-                        if discovered_doc_id != primary_id:
-                            dup_ids = existing_for_key.setdefault("duplicate_doc_ids", [])
-                            if discovered_doc_id not in dup_ids:
-                                dup_ids.append(discovered_doc_id)
-                    if discovered_key in seen_discovered_keys:
-                        continue
-                    seen_discovered_keys.add(discovered_key)
-                    existing_discovered.append({
-                        'name': a.get('name'),
-                        'normalized_due_at': a.get('normalizedDueAt'),
-                        'category': a.get('category'),
-                        'status': a.get('status'),
-                        'discovered_key': discovered_key,
-                    })
-
-        # Legacy format for initial sync
-        assignments = [{
-            'canvas_assignment_id': a.get('canvas_assignment_id'),
-            'name': a.get('name'),
-            'original_due_at': a.get('original_due_at'),
-            'normalized_due_at': a.get('normalized_due_at')
-        } for a in canvas_assignments]
-
-        file_types = ["schedule", "syllabus", "front_page", "modules"]
-        files_raw = []
-        seen_file_keys = set()
-        for scoped_course_id in grouped_course_ids:
-            for ft in file_types:
-                try:
-                    scoped_files = get_course_file_texts(user_id, scoped_course_id, ft, active_credential_key)
-                except Exception:
-                    continue
-                for f in scoped_files:
-                    extracted_text = str(f.get('extractedText') or "")
-                    file_key = (
-                        str(f.get('fileType') or ""),
-                        str(f.get('fileName') or ""),
-                        bool(f.get('isPrevious')),
-                        hashlib.md5(extracted_text.encode("utf-8", errors="ignore")).hexdigest()[:16],
-                    )
-                    if file_key in seen_file_keys:
-                        continue
-                    seen_file_keys.add(file_key)
-                    files_raw.append(f)
-
-        files_raw.sort(key=lambda f: len((f.get('extractedText') or "")), reverse=True)
-
-        new_files = [{
-            'file_name': f.get('fileName'),
-            'file_type': f.get('fileType'),
-            'extracted_text': f.get('extractedText')
-        } for f in files_raw if not f.get('isPrevious')]
-        
-        # Get previous files (archived from last sync)
-        previous_files = [{
-            'file_name': f.get('fileName'),
-            'file_type': f.get('fileType'),
-            'extracted_text': f.get('extractedText')
-        } for f in files_raw if f.get('isPrevious')]
-        
-        # For backwards compatibility
-        files = new_files if new_files else [{
-            'file_name': f.get('fileName'),
-            'file_type': f.get('fileType'),
-            'extracted_text': f.get('extractedText')
-        } for f in files_raw]
-
-        announcements = []
-        seen_announcement_keys = set()
-        for scoped_course_id in grouped_course_ids:
-            for ann in get_all_announcements(scoped_course_id, user_id, active_credential_key):
-                ann_key = (
-                    str(ann.get('canvas_announcement_id') or ""),
-                    str(ann.get('title') or ""),
-                    str(ann.get('posted_at') or ""),
-                )
-                if ann_key in seen_announcement_keys:
-                    continue
-                seen_announcement_keys.add(ann_key)
-                announcements.append(ann)
-        
-        # Detect if this is a resync
-        is_resync = len(existing_discovered) > 0 or len(previous_files) > 0
-    else:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT canvas_assignment_id, name, original_due_at, normalized_due_at,
-                   status, category, description
-            FROM assignments_normalized
-            WHERE course_id = ?
-        """, (course_id,))
-        assignments_raw = [dict(r) for r in cur.fetchall()]
-
-        canvas_assignments = [{
-            'canvas_assignment_id': a.get('canvas_assignment_id'),
-            'name': a.get('name'),
-            'description': html_to_text(a.get('description') or ""),
-            'original_due_at': a.get('original_due_at'),
-            'normalized_due_at': a.get('normalized_due_at')
-        } for a in assignments_raw if a.get('canvas_assignment_id')]
-
-        existing_discovered = [{
-            'name': a.get('name'),
-            'description': html_to_text(a.get('description') or ""),
-            'normalized_due_at': a.get('normalized_due_at'),
-            'category': a.get('category'),
-            'status': a.get('status')
-        } for a in assignments_raw if not a.get('canvas_assignment_id')]
-        deduped_existing_discovered = {}
-        for item in existing_discovered:
-            key = build_discovered_item_dedupe_key(
-                name=item.get("name"),
-                due=item.get("normalized_due_at"),
-                category=item.get("category"),
-                description=item.get("description"),
-            )
-            if key and key not in deduped_existing_discovered:
-                deduped_existing_discovered[key] = item
-        existing_discovered = list(deduped_existing_discovered.values())
-
-        assignments = canvas_assignments
-
-        cur.execute("""
-            SELECT file_name, file_type, extracted_text, is_previous
-            FROM course_file_text
-            WHERE course_id = ? AND file_type IN ('schedule', 'syllabus', 'front_page', 'modules')
-            ORDER BY LENGTH(extracted_text) DESC
-        """, (course_id,))
-        files_raw = [dict(r) for r in cur.fetchall()]
-
-        new_files = [{
-            'file_name': f.get('file_name'),
-            'file_type': f.get('file_type'),
-            'extracted_text': f.get('extracted_text')
-        } for f in files_raw if not f.get('is_previous')]
-
-        previous_files = [{
-            'file_name': f.get('file_name'),
-            'file_type': f.get('file_type'),
-            'extracted_text': f.get('extracted_text')
-        } for f in files_raw if f.get('is_previous')]
-
-        files = new_files if new_files else [{
-            'file_name': f.get('file_name'),
-            'file_type': f.get('file_type'),
-            'extracted_text': f.get('extracted_text')
-        } for f in files_raw]
-        conn.close()
-
-        announcements = get_all_announcements(course_id)
-
-        # Local resync detection
-        is_resync = len(existing_discovered) > 0 or len(previous_files) > 0
-
-    if len(grouped_course_ids) > 1:
-        print(f"[GROUP SYNC] Unified class-code resolve across {len(grouped_course_ids)} courses: {grouped_course_ids}")
-
-    if is_resync:
-        print(f"[AI RESYNC] Conservative update with {len(canvas_assignments)} Canvas, {len(existing_discovered)} existing discovered")
-        print(f"[AI RESYNC] Comparing {len(previous_files)} previous files with {len(new_files)} new files")
-    else:
-        print(f"[AI] Resolving {len(assignments)} Canvas assignments using {len(files)} files and {len(announcements)} announcements")
-
-    ai_usage_payload = None
-    ai_usage_context = {
-        "request_id": str(uuid.uuid4()),
-        "user_id": user_id,
-        "course_id": course_id,
-        "is_resync": is_resync,
-        "grouped_course_ids": grouped_course_ids,
-    }
-
-    try:
-        # Lazy import to avoid Cloud Run cold start slowdown for non-AI endpoints.
-        from ai.llm_model import (
-            resolve_assignment_dates_with_llm,
-            resync_assignment_dates_with_llm,
+    has_llm_key = any((os.getenv(name) or "").strip() for name in ("LLM_API_KEY", "OPENROUTER_API_KEY", "LAMBDA_API_KEY"))
+    if active_credential_key == DEMO_CREDENTIAL_KEY and (not IS_PRODUCTION or not has_llm_key):
+        from demo_memory_store import (
+            get_course_assignments as demo_get_course_assignments,
+            update_assignment as demo_update_assignment,
         )
 
-        max_ai_attempts = 3
-        ai_resp = None
-        last_ai_error = None
-        for attempt in range(1, max_ai_attempts + 1):
-            try:
-                if is_resync:
-                    ai_resp = resync_assignment_dates_with_llm(
-                        existing_assignments=existing_discovered,
-                        canvas_assignments=canvas_assignments,
-                        previous_files=previous_files,
-                        new_files=new_files,
-                        announcements=announcements,
-                        course_timezone=timezone,
-                        discover_new_assignments=discover_new,
-                        telemetry_context=ai_usage_context,
-                    )
-                    print(f"[AI RESYNC] Summary: {ai_resp.get('changes_summary', 'N/A')}")
-                else:
-                    ai_resp = resolve_assignment_dates_with_llm(
-                        assignments=assignments,
-                        announcements=announcements,
-                        files=files,
-                        course_timezone=timezone,
-                        confidence_threshold=0.0,
-                        discover_new_assignments=discover_new,
-                        telemetry_context=ai_usage_context,
-                    )
-                break
-            except Exception as ai_err:
-                last_ai_error = ai_err
-                if attempt >= max_ai_attempts or not is_transient_ai_error(ai_err):
-                    raise
-                backoff_seconds = min(8.0, 1.25 * (2 ** (attempt - 1)))
-                print(
-                    f"[WARN] AI transient failure (attempt {attempt}/{max_ai_attempts}): {ai_err}. "
-                    f"Retrying in {backoff_seconds:.1f}s."
+        demo_group_results = []
+        course_results = []
+        for group_course_ids in course_groups:
+            group_course_ids = list(dict.fromkeys(str(c).strip() for c in group_course_ids if str(c).strip()))
+            group_id = group_course_ids[0] if group_course_ids else course_id
+            group_updated = 0
+            group_conflicts = 0
+            for scoped_course_id in group_course_ids:
+                stats = resolve_demo_assignments_without_ai(
+                    user_id,
+                    scoped_course_id,
+                    now_iso=now_iso,
+                    get_course_assignments=demo_get_course_assignments,
+                    update_assignment=demo_update_assignment,
                 )
-                time.sleep(backoff_seconds)
+                group_updated += int(stats.get("updated") or 0)
+                group_conflicts += int(stats.get("conflicts") or 0)
+                course_results.append({"course_id": scoped_course_id, "status": "succeeded"})
 
-        if ai_resp is None and last_ai_error is not None:
-            raise last_ai_error
+            demo_group_results.append({
+                "group_id": group_id,
+                "status": "succeeded",
+                "updated": group_updated,
+                "conflicts": group_conflicts,
+                "discovered": 0,
+                "is_resync": False,
+                "courses": [{"course_id": cid, "status": "succeeded"} for cid in group_course_ids],
+                "demo": True,
+                "fallback": "local-demo-no-llm",
+            })
+
+        return jsonify({
+            "course_id": course_id,
+            "course_ids": all_course_ids,
+            "grouped_course_ids": grouped_course_ids,
+            "grouped_course_count": len(grouped_course_ids),
+            "group_count": len(demo_group_results),
+            "parallel": False,
+            "groups": demo_group_results,
+            "courses": course_results,
+            "succeeded_count": len(course_results),
+            "failed_count": 0,
+            "succeeded_group_count": len(demo_group_results),
+            "failed_group_count": 0,
+            "is_resync": False,
+            "updated": sum(int(r.get("updated") or 0) for r in demo_group_results),
+            "conflicts": sum(int(r.get("conflicts") or 0) for r in demo_group_results),
+            "discovered": 0,
+            "demo": True,
+            "fallback": "local-demo-no-llm",
+        }), 200
+
+    from ai.llm_model import resolve_assignment_dates_with_llm, resync_assignment_dates_with_llm
+    from ai.parallel_course_resolve import (
+        AI_MAX_CONCURRENCY,
+        call_with_transient_retry,
+        run_parallel_group_resolve,
+    )
+
+    request_id = str(uuid.uuid4())
+    print(
+        f"[AI PARALLEL] Resolving {len(course_groups)} group(s) "
+        f"({len(all_course_ids)} course(s)) with max_concurrency={AI_MAX_CONCURRENCY}: "
+        f"{course_groups}"
+    )
+
+    def _resolve_one_group(group_course_ids):
+        group_course_ids = list(dict.fromkeys(str(c).strip() for c in group_course_ids if str(c).strip()))
+        group_key = group_course_ids[0]
+        if len(group_course_ids) > 1:
+            print(f"[GROUP SYNC] Unified class-code resolve across {len(group_course_ids)} courses: {group_course_ids}")
+
+        if active_credential_key == DEMO_CREDENTIAL_KEY:
+            ctx = _load_cloud_group_ai_context(user_id, group_course_ids, active_credential_key)
+        elif CLOUD_MODE:
+            ctx = _load_cloud_group_ai_context(user_id, group_course_ids, active_credential_key)
+        else:
+            ctx = _load_local_course_ai_context(group_key)
+
+        is_resync = ctx["is_resync"]
+        if is_resync:
+            print(
+                f"[AI RESYNC] group={group_key}: "
+                f"{len(ctx['canvas_assignments'])} Canvas, "
+                f"{len(ctx['existing_discovered'])} existing discovered"
+            )
+        else:
+            print(
+                f"[AI] group={group_key}: resolving "
+                f"{len(ctx['assignments'])} assignments, "
+                f"{len(ctx['files'])} files, {len(ctx['announcements'])} announcements"
+            )
+
+        telemetry_context = {
+            "request_id": request_id,
+            "user_id": user_id,
+            "course_id": group_key,
+            "is_resync": is_resync,
+            "grouped_course_ids": group_course_ids,
+        }
+
+        def _call_llm():
+            if is_resync:
+                return resync_assignment_dates_with_llm(
+                    existing_assignments=ctx["existing_discovered"],
+                    canvas_assignments=ctx["canvas_assignments"],
+                    previous_files=ctx["previous_files"],
+                    new_files=ctx["new_files"],
+                    announcements=ctx["announcements"],
+                    course_timezone=timezone,
+                    discover_new_assignments=discover_new,
+                    telemetry_context=telemetry_context,
+                )
+            return resolve_assignment_dates_with_llm(
+                assignments=ctx["assignments"],
+                announcements=ctx["announcements"],
+                files=ctx["files"],
+                course_timezone=timezone,
+                confidence_threshold=0.0,
+                discover_new_assignments=discover_new,
+                telemetry_context=telemetry_context,
+            )
+
+        ai_resp = call_with_transient_retry(
+            _call_llm,
+            is_transient_error=is_transient_ai_error,
+            label=f"AI group={group_key}",
+        )
 
         if isinstance(ai_resp, dict):
-            ai_usage_payload = ai_resp.pop("_usage", None)
-            if ai_usage_payload:
+            usage_payload = ai_resp.pop("_usage", None)
+            if usage_payload and CLOUD_MODE:
                 persist_ai_usage_log(
                     user_id,
-                    ai_usage_payload,
-                    course_id=course_id,
+                    usage_payload,
+                    course_id=group_key,
                     canvas_credential_key=active_credential_key,
                 )
 
-        ai_course_code = ai_resp.get("cc") or ai_resp.get("course_code")
-        ai_results = ai_resp.get("a") or ai_resp.get("assignments", [])
-
-        canvas_updates = [r for r in ai_results if (r.get("cid") or r.get("canvas_assignment_id"))]
-        discovered_raw = [r for r in ai_results if not (r.get("cid") or r.get("canvas_assignment_id"))]
-        discovered = dedupe_discovered_ai_results(discovered_raw)
-        if len(discovered) < len(discovered_raw):
-            print(
-                f"[DEDUPE] Collapsed discovered AI rows from {len(discovered_raw)} to {len(discovered)} "
-                "using semantic keys."
+        if active_credential_key == DEMO_CREDENTIAL_KEY:
+            stats = _apply_cloud_group_ai_results(
+                user_id,
+                group_course_ids,
+                ai_resp,
+                ctx,
+                active_credential_key,
+                discover_new,
+            )
+        elif CLOUD_MODE:
+            stats = _apply_cloud_group_ai_results(
+                user_id,
+                group_course_ids,
+                ai_resp,
+                ctx,
+                active_credential_key,
+                discover_new,
+            )
+        else:
+            stats = _apply_local_course_ai_results(
+                group_key,
+                ai_resp,
+                ctx,
+                discover_new,
             )
 
+        if is_resync:
+            print(f"[AI RESYNC] group={group_key} summary: {stats.get('changes_summary', 'N/A')}")
+
+        stats["courses"] = [
+            {"course_id": cid, "status": "succeeded"} for cid in group_course_ids
+        ]
+        return stats
+
+    try:
+        group_results = run_parallel_group_resolve(
+            course_groups,
+            _resolve_one_group,
+        )
     except Exception as e:
-        logger.error("AI resolve failed: %s", e)
+        logger.error("AI parallel resolve orchestration failed: %s", e)
         import traceback
         traceback.print_exc()
         err_text = str(e or "")
@@ -3986,426 +4771,63 @@ def resolve_course_dates():
         error_label = "AI resolve temporarily unavailable" if status_code == 503 else "AI resolve failed"
         return jsonify({"error": error_label}), status_code
 
-    updated = 0
-    conflicts = 0
-    discovered_count = 0
+    succeeded_groups = [r for r in group_results if r.get("status") == "succeeded"]
+    failed_groups = [r for r in group_results if r.get("status") == "failed"]
+    course_results = []
+    for group_entry in group_results:
+        group_id = group_entry.get("group_id")
+        for course_entry in group_entry.get("courses") or []:
+            course_results.append({
+                **course_entry,
+                "group_id": group_id,
+            })
 
-    if USE_FIRESTORE:
-        # Update assignments in Firestore
-        canvas_by_id = {str(a.get("canvas_assignment_id")): a for a in canvas_assignments}
-        for r in canvas_updates:
-            canvas_id = r.get("cid") or r.get("canvas_assignment_id")
-            if not canvas_id:
-                continue
+    succeeded_courses = [c for c in course_results if c.get("status") == "succeeded"]
+    failed_courses = [c for c in course_results if c.get("status") == "failed"]
 
-            st = r.get("st") or r.get("status")
-            ai_category = r.get("cat") or r.get("category") or "ASSIGNMENT"
-            due = r.get("due") or r.get("normalized_due_at")
-            deliverable = 0 if ai_category in ("READING", "ATTENDANCE", "PLACEHOLDER", "LECTURE") else 1
+    if not succeeded_groups and failed_groups:
+        first_err = failed_groups[0].get("error") or "All course groups failed AI resolve"
+        if "LLM_API_KEY is not set" in first_err:
+            return jsonify({
+                "error": "AI is not configured on the server. Set LLM_API_KEY (OpenRouter) on Cloud Run.",
+            }), 503
+        status_code = 503 if any(
+            is_transient_ai_error(Exception(r.get("error") or "")) for r in failed_groups
+        ) else 500
+        error_label = "AI resolve temporarily unavailable" if status_code == 503 else "AI resolve failed"
+        return jsonify({
+            "error": error_label,
+            "groups": group_results,
+            "courses": course_results,
+            "group_count": len(group_results),
+            "succeeded_group_count": len(succeeded_groups),
+            "failed_group_count": len(failed_groups),
+            "failed_count": len(failed_courses),
+        }), status_code
 
-            # Preserve Canvas due_at (and its time) for real Canvas assignments.
-            existing_canvas = canvas_by_id.get(str(canvas_id)) or {}
-            original_due_at = existing_canvas.get("original_due_at")
-            existing_normalized = existing_canvas.get("normalized_due_at")
-
-            due_to_set = original_due_at or due or existing_normalized
-
-            updates = {
-                'status': st,
-                'category': ai_category,
-                'deliverable': deliverable,
-            }
-            if due_to_set is not None:
-                updates['normalizedDueAt'] = due_to_set
-
-            target_course_id = str(
-                canvas_course_lookup.get(str(canvas_id))
-                or existing_canvas.get("course_id")
-                or course_id
-            ).strip() or course_id
-
-            update_assignment(user_id, target_course_id, canvas_id, updates, active_credential_key)
-
-            if st == "RESOLVED":
-                updated += 1
-            elif st == "CONFLICT":
-                conflicts += 1
-
-        target_course_ids_for_discovered = grouped_course_ids if grouped_course_ids else [course_id]
-        stale_discovered_doc_ids_by_course = {}
-        suppressed_discovered_against_canvas = 0
-
-        # Pre-clean existing discovered items that are clearly duplicates of Canvas items.
-        for scoped_course_id in target_course_ids_for_discovered:
-            scoped_course_id = str(scoped_course_id)
-            scoped_course_key_map = existing_discovered_by_course.get(scoped_course_id) or {}
-            if not scoped_course_key_map:
-                continue
-            canvas_signatures = canvas_semantics_by_course.get(scoped_course_id) or []
-            if not canvas_signatures:
-                continue
-
-            for discovered_key, existing_entry in list(scoped_course_key_map.items()):
-                if not discovered_matches_canvas(
-                    name=existing_entry.get("name") or "",
-                    due=existing_entry.get("normalized_due_at") or "",
-                    category=existing_entry.get("category") or "",
-                    description="",
-                    canvas_signatures=canvas_signatures,
-                ):
-                    continue
-
-                stale_ids = stale_discovered_doc_ids_by_course.setdefault(scoped_course_id, set())
-                primary_id = str(existing_entry.get("id") or "").strip()
-                if primary_id:
-                    stale_ids.add(primary_id)
-                for dup_id in existing_entry.get("duplicate_doc_ids") or []:
-                    dup_id = str(dup_id or "").strip()
-                    if dup_id:
-                        stale_ids.add(dup_id)
-                scoped_course_key_map.pop(discovered_key, None)
-                suppressed_discovered_against_canvas += 1
-
-        # Handle discovered assignments
-        if discovered:
-            # For RESYNC: Don't delete existing discovered - merge/update instead
-            # For initial sync: Delete and recreate (no existing data to preserve)
-            if not is_resync:
-                for scoped_course_id in target_course_ids_for_discovered:
-                    delete_discovered_assignments(user_id, scoped_course_id, active_credential_key)
-                print(
-                    f"[INITIAL SYNC] Cleared discovered items for {len(target_course_ids_for_discovered)} "
-                    f"course(s), adding {len(discovered)} new entries per course"
-                )
-            else:
-                print(
-                    f"[RESYNC] Merging {len(discovered)} items across "
-                    f"{len(target_course_ids_for_discovered)} grouped course(s)"
-                )
-
-            for r in discovered:
-                status = r.get("st") or r.get("status")
-                action = r.get("action", "").upper()
-                
-                # Skip items if they shouldn't be added
-                if status not in ("DISCOVERED", "EXISTING") and action not in ("KEEP", "UPDATE", "ADD"):
-                    continue
-
-                name = (r.get("nam") or r.get("name") or "").strip()
-                desc = (r.get("des") or r.get("description") or "").strip()
-                due = r.get("due") or r.get("normalized_due_at")
-
-                if not name:
-                    continue
-
-                force_assignment = force_assignment_if_deliverable_keywords(name, desc)
-                model_category = (r.get("cat") or r.get("category") or "").strip().upper()
-                
-                # Normalize QUIZ to EXAM
-                if model_category == "QUIZ":
-                    model_category = "EXAM"
-
-                if force_assignment:
-                    category = "ASSIGNMENT"
-                    deliverable = 1
-                elif model_category in ("ASSIGNMENT", "EXAM", "PLACEHOLDER"):
-                    category = model_category
-                    deliverable = 1 if category in ("ASSIGNMENT", "EXAM") else 0
-                else:
-                    category, deliverable = infer_category_from_discovered_item(name, desc)
-
-                if not due:
-                    if category == "EXAM":
-                        print(f"   [WARN] Keeping exam without date: {name}")
-                    else:
-                        continue
-
-                discovered_key = build_discovered_item_dedupe_key(
-                    name=name,
-                    due=due,
-                    category=category,
-                    description=desc,
-                )
-
-                # Log the action for resync
-                if is_resync and action:
-                    if action == "KEEP":
-                        print(f"   [KEEP] {category}: {name}")
-                    elif action == "UPDATE":
-                        print(f"   [UPDATE] {category}: {name} - {r.get('reason', '')}")
-                    elif action == "ADD":
-                        print(f"   + Adding {category}: {name}")
-
-                for scoped_course_id in target_course_ids_for_discovered:
-                    scoped_course_id = str(scoped_course_id)
-                    scoped_course_key_map = existing_discovered_by_course.setdefault(scoped_course_id, {})
-                    existing_for_key = scoped_course_key_map.get(discovered_key) if discovered_key else None
-                    existing_doc_id = str(existing_for_key.get("id") or "").strip() if existing_for_key else ""
-                    canvas_signatures = canvas_semantics_by_course.get(scoped_course_id) or []
-                    if discovered_matches_canvas(
-                        name=name,
-                        due=due,
-                        category=category,
-                        description=desc,
-                        canvas_signatures=canvas_signatures,
-                    ):
-                        stale_ids = stale_discovered_doc_ids_by_course.setdefault(scoped_course_id, set())
-                        if existing_doc_id:
-                            stale_ids.add(existing_doc_id)
-                        if existing_for_key:
-                            for dup_id in existing_for_key.get("duplicate_doc_ids") or []:
-                                dup_id = str(dup_id or "").strip()
-                                if dup_id:
-                                    stale_ids.add(dup_id)
-                            scoped_course_key_map.pop(discovered_key, None)
-                        suppressed_discovered_against_canvas += 1
-                        if is_resync:
-                            print(f"   [SKIP DUP-CANVAS] {category}: {name}")
-                        continue
-
-                    if existing_for_key:
-                        stale_ids = stale_discovered_doc_ids_by_course.setdefault(scoped_course_id, set())
-                        for dup_id in existing_for_key.get("duplicate_doc_ids") or []:
-                            dup_id = str(dup_id or "").strip()
-                            if dup_id and dup_id != existing_doc_id:
-                                stale_ids.add(dup_id)
-
-                    # Preserve stable naming for existing discovered items so doc ids stay stable
-                    # across minor wording changes (quiz/test/exam aliases).
-                    name_to_store = (existing_for_key.get("name") if existing_for_key else name) or name
-
-                    saved_doc_id = save_assignment(user_id, scoped_course_id, {
-                        'name': name_to_store,
-                        'description': desc or "Discovered from schedule",
-                        'normalized_due_at': due,
-                        'source_of_truth': 'Schedule!',
-                        'status': 'DISCOVERED',
-                        'category': category,
-                        'deliverable': deliverable,
-                        'existing_doc_id': existing_doc_id or None,
-                        'discovered_key': discovered_key,
-                        'raw_canvas_json': json.dumps({
-                            "discovered": True,
-                            "category": category,
-                            "action": action,
-                            "grouped_course_ids": target_course_ids_for_discovered,
-                        })
-                    }, active_credential_key)
-                    if discovered_key:
-                        remaining_dup_ids = []
-                        if existing_for_key:
-                            remaining_dup_ids = [
-                                str(dup_id).strip()
-                                for dup_id in (existing_for_key.get("duplicate_doc_ids") or [])
-                                if str(dup_id).strip() and str(dup_id).strip() != str(saved_doc_id).strip()
-                            ]
-                        scoped_course_key_map[discovered_key] = {
-                            "id": saved_doc_id,
-                            "name": name_to_store,
-                            "normalized_due_at": due,
-                            "category": category,
-                            "status": "DISCOVERED",
-                            "duplicate_doc_ids": remaining_dup_ids,
-                        }
-                    discovered_count += 1
-
-                if not is_resync or action == "ADD":
-                    if len(target_course_ids_for_discovered) > 1:
-                        print(
-                            f"   [DISCOVERED] {category}: {name} due {due} "
-                            f"(applied to {len(target_course_ids_for_discovered)} courses)"
-                        )
-                    else:
-                        print(f"   [DISCOVERED] {category}: {name} due {due}")
-
-            removed_discovered_duplicates = 0
-            for scoped_course_id, stale_ids in stale_discovered_doc_ids_by_course.items():
-                stale_list = [doc_id for doc_id in sorted(stale_ids) if doc_id]
-                if not stale_list:
-                    continue
-                try:
-                    removed_discovered_duplicates += delete_assignments_by_doc_ids(
-                        user_id,
-                        stale_list,
-                        active_credential_key,
-                    )
-                except Exception as cleanup_err:
-                    print(
-                        f"[WARN] Failed dedupe cleanup for course {scoped_course_id}: {cleanup_err}"
-                    )
-            if removed_discovered_duplicates > 0:
-                print(
-                    f"[DEDUPE] Removed {removed_discovered_duplicates} stale discovered duplicate "
-                    f"document(s) across grouped courses."
-                )
-            if suppressed_discovered_against_canvas > 0:
-                print(
-                    f"[DEDUPE] Suppressed {suppressed_discovered_against_canvas} discovered item instance(s) "
-                    "that matched Canvas assignments."
-                )
-
-        # Update course code only when it is missing/UNK to avoid tag drift between reloads.
-        if ai_course_code:
-            normalized_ai_code = normalize_course_code(ai_course_code)
-            for scoped_course_id in target_course_ids_for_discovered:
-                existing_course = get_course(user_id, scoped_course_id, active_credential_key)
-                existing_course_code = normalize_course_code(
-                    existing_course.get('courseCode') if existing_course else ""
-                )
-                if normalized_ai_code and (
-                    not existing_course_code or
-                    existing_course_code == "UNK" or
-                    existing_course_code == normalized_ai_code
-                ):
-                    update_course_metadata(user_id, scoped_course_id, normalized_ai_code, active_credential_key)
-                else:
-                    print(
-                        f"[COURSE CODE] Keeping existing code '{existing_course_code}' "
-                        f"for course {scoped_course_id}; skipped AI suggestion '{normalized_ai_code}'"
-                    )
-
-    else:
-        # Local mode: SQLite (existing logic)
-        conn = get_db()
-        cur = conn.cursor()
-
-        for r in canvas_updates:
-            canvas_id = r.get("cid") or r.get("canvas_assignment_id")
-            if not canvas_id:
-                continue
-
-            st = r.get("st") or r.get("status")
-            ai_category = r.get("cat") or r.get("category") or "ASSIGNMENT"
-            due = r.get("due") or r.get("normalized_due_at")
-            deliverable = 0 if ai_category in ("READING", "ATTENDANCE", "PLACEHOLDER", "LECTURE") else 1
-
-            cur.execute("""
-                UPDATE assignments_normalized
-                SET normalized_due_at = ?, status = ?, category = ?, deliverable = ?
-                WHERE course_id = ? AND canvas_assignment_id = ?
-            """, (due, st, ai_category, deliverable, course_id, canvas_id))
-
-            if st == "RESOLVED":
-                updated += 1
-            elif st == "CONFLICT":
-                conflicts += 1
-
-        # Handle discovered assignments
-        if discovered:
-            if not is_resync:
-                cur.execute("""
-                    DELETE FROM assignments_normalized 
-                    WHERE course_id = ? AND canvas_assignment_id IS NULL
-                """, (course_id,))
-                conn.commit()
-            else:
-                print(f"[RESYNC] Merging {len(discovered)} items with existing discovered")
-
-            for r in discovered:
-                status = r.get("st") or r.get("status")
-                action = (r.get("action") or ("KEEP" if is_resync else "")).upper()
-                if action == "REMOVE":
-                    continue
-                if status not in ("DISCOVERED", "EXISTING") and action not in ("KEEP", "UPDATE", "ADD"):
-                    continue
-
-                name = (r.get("nam") or r.get("name") or "").strip()
-                desc = (r.get("des") or r.get("description") or "").strip()
-                due = r.get("due") or r.get("normalized_due_at")
-
-                if not name:
-                    continue
-
-                force_assignment = force_assignment_if_deliverable_keywords(name, desc)
-                model_category = (r.get("cat") or r.get("category") or "").strip().upper()
-                
-                # Normalize QUIZ to EXAM
-                if model_category == "QUIZ":
-                    model_category = "EXAM"
-
-                if force_assignment:
-                    category = "ASSIGNMENT"
-                    deliverable = 1
-                elif model_category in ("ASSIGNMENT", "EXAM", "PLACEHOLDER"):
-                    category = model_category
-                    deliverable = 1 if category in ("ASSIGNMENT", "EXAM") else 0
-                else:
-                    category, deliverable = infer_category_from_discovered_item(name, desc)
-
-                if not due:
-                    if category == "EXAM":
-                        print(f"   [WARN] Keeping exam without date: {name}")
-                    else:
-                        continue
-
-                raw_meta = json.dumps({"discovered": True, "category": category, "action": action})
-
-                if is_resync and action in ("KEEP", "UPDATE"):
-                    cur.execute("""
-                        UPDATE assignments_normalized
-                        SET description = ?, normalized_due_at = ?, status = ?, category = ?,
-                            deliverable = ?, raw_canvas_json = ?, updated_at = ?
-                        WHERE course_id = ? AND canvas_assignment_id IS NULL AND name = ?
-                    """, (
-                        desc or "Discovered from schedule",
-                        due,
-                        "DISCOVERED",
-                        category,
-                        deliverable,
-                        raw_meta,
-                        now_iso(),
-                        course_id,
-                        name
-                    ))
-
-                    if cur.rowcount == 0:
-                        cur.execute("""
-                            INSERT INTO assignments_normalized (
-                                course_id, canvas_assignment_id, name, description,
-                                original_due_at, normalized_due_at, source_of_truth,
-                                confidence, status, raw_canvas_json, category,
-                                deliverable, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            course_id, None, name, desc or "Discovered from schedule",
-                            None, due, "Schedule!", None, "DISCOVERED",
-                            raw_meta,
-                            category, deliverable, now_iso(), now_iso()
-                        ))
-                    discovered_count += 1
-                    if action == "UPDATE":
-                        print(f"   [UPDATE] {category}: {name}")
-                    else:
-                        print(f"   [KEEP] {category}: {name}")
-                else:
-                    cur.execute("""
-                        INSERT INTO assignments_normalized (
-                            course_id, canvas_assignment_id, name, description,
-                            original_due_at, normalized_due_at, source_of_truth,
-                            confidence, status, raw_canvas_json, category,
-                            deliverable, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        course_id, None, name, desc or "Discovered from schedule",
-                        None, due, "Schedule!", None, "DISCOVERED",
-                        raw_meta,
-                        category, deliverable, now_iso(), now_iso()
-                    ))
-                    discovered_count += 1
-                    print(f"   [DISCOVERED] {category}: {name} due {due}")
-
-        conn.commit()
-        conn.close()
+    total_updated = sum(int(r.get("updated") or 0) for r in succeeded_groups)
+    total_conflicts = sum(int(r.get("conflicts") or 0) for r in succeeded_groups)
+    total_discovered = sum(int(r.get("discovered") or 0) for r in succeeded_groups)
+    any_resync = any(bool(r.get("is_resync")) for r in succeeded_groups)
 
     return jsonify({
         "course_id": course_id,
+        "course_ids": all_course_ids,
         "grouped_course_ids": grouped_course_ids,
         "grouped_course_count": len(grouped_course_ids),
-        "is_resync": is_resync,
-        "updated": updated,
-        "conflicts": conflicts,
-        "discovered": discovered_count,
-        "changes_summary": ai_resp.get("changes_summary") if is_resync else None
+        "group_count": len(group_results),
+        "parallel": True,
+        "max_concurrency": AI_MAX_CONCURRENCY,
+        "groups": group_results,
+        "courses": course_results,
+        "succeeded_count": len(succeeded_courses),
+        "failed_count": len(failed_courses),
+        "succeeded_group_count": len(succeeded_groups),
+        "failed_group_count": len(failed_groups),
+        "is_resync": any_resync,
+        "updated": total_updated,
+        "conflicts": total_conflicts,
+        "discovered": total_discovered,
     }), 200
 
 
@@ -4420,14 +4842,14 @@ if __name__ == "__main__":
 
     # Security: In local mode (no auth), refuse to bind to 0.0.0.0 unless explicitly allowed.
     # This prevents accidental exposure of an unauthenticated backend to the network.
-    if not USE_FIRESTORE and host == '0.0.0.0':
+    if not CLOUD_MODE and host == '0.0.0.0':
         allow_local_public = os.getenv("ALLOW_LOCAL_PUBLIC", "").strip().lower() in {"1", "true", "yes", "on"}
         if not allow_local_public:
             host = '127.0.0.1'
             print("[SECURITY] Local mode: binding to 127.0.0.1 only (no auth). Set ALLOW_LOCAL_PUBLIC=1 to bind to 0.0.0.0")
 
     print("\n[START] Canvas Organizer Backend")
-    print(f"   Mode: {'CLOUD (Firestore)' if USE_FIRESTORE else 'LOCAL (SQLite)'}")
+    print(f"   Mode: {'CLOUD (Firestore)' if CLOUD_MODE else 'LOCAL (SQLite)'}")
     print(f"   Port: {port}")
     print(f"   Debug: {debug}\n")
 

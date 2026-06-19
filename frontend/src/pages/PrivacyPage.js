@@ -30,15 +30,15 @@ export default function PrivacyPage() {
         </ul>
       </LegalSection>
 
-      <LegalSection title="4. AI processing (OpenRouter)">
+      <LegalSection title="4. AI processing (OpenRouter to DeepInfra)">
         <p>
-          When you sync a course, we may send de-identified course materials to <strong className="text-zinc-100">OpenRouter</strong> (an API gateway) to infer due dates. We do not include your name, email, or Canvas user ID in those API requests.
+          When you sync a course, we send relevant course text to <strong className="text-zinc-100">OpenRouter</strong> (an API gateway), which routes the request to <strong className="text-zinc-100">DeepInfra</strong> for AI inference. We use this to infer due dates that Canvas does not expose directly.
         </p>
         <p>
-          Our OpenRouter account has <strong className="text-zinc-100">private input/output logging turned off</strong>. Per OpenRouter’s documentation, prompts and completions are not stored unless logging is explicitly enabled. We request zero-data-retention routing where supported.
+          AI requests are pinned to DeepInfra, require zero-data-retention (ZDR) routing, deny provider data collection, and disable provider fallback. If a matching DeepInfra ZDR endpoint is not available, the request should fail instead of routing to another provider. We do not intentionally include your name, email, or Canvas user ID in AI prompts, and we do not store full AI prompts or completions in our database.
         </p>
         <p>
-          <strong className="text-zinc-100">Important limitation:</strong> we cannot guarantee that all content sent to the AI is anonymous. Course documents may contain instructor names, email addresses, or other text. We apply automated redaction (emails, phone numbers, common ID patterns) before sending, but incidental identifying information may remain.
+          <strong className="text-zinc-100">Important limitation:</strong> course text is not guaranteed anonymous. Syllabi, announcements, and files may contain instructor names, student names, email addresses, office locations, or other identifiers. We apply automated redaction for common patterns such as emails, phone numbers, tokens, and ID-like numbers before sending, but incidental identifying information may remain.
         </p>
       </LegalSection>
 
@@ -51,7 +51,7 @@ export default function PrivacyPage() {
       </LegalSection>
 
       <LegalSection title="6. Retention and deletion">
-        <p>We retain synced data until you delete it or stop using the Service. You may call our delete-data API (via Settings when available) to revoke Canvas tokens and erase stored rows.</p>
+        <p>We retain synced data until you delete it or stop using the Service. You can export or permanently delete all stored data from Settings, which revokes Canvas tokens and erases stored rows.</p>
         <p>OAuth tokens are removed on logout. Contact us if you need help deleting data.</p>
       </LegalSection>
 

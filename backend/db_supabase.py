@@ -1,6 +1,5 @@
 # Supabase (Postgres) Database Adapter
-# Drop-in replacement for db_firestore.py — exposes the same function signatures
-# so that app.py can switch imports without any other code changes.
+# Cloud-mode data access for CanvasSync (Supabase Postgres + RLS deny-all).
 
 import logging
 import os
@@ -14,15 +13,26 @@ from typing import Dict, List, Optional, Any
 from cryptography.fernet import Fernet, InvalidToken
 from supabase import create_client, Client
 
+from app_config import IS_PRODUCTION
+
 logger = logging.getLogger(__name__)
 
 _supabase_client: Optional[Client] = None
 _initialized = False
 TOKEN_ENCRYPTION_PREFIX = "enc:v1:"
+_DEV_LEGAL_CONSENTS: Dict[str, Dict[str, str]] = {}
+
+
+def _is_legal_consent_schema_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "legal_consent" in message
+        and ("schema cache" in message or "column" in message or "pgrst204" in message)
+    )
 
 
 # =============================================================================
-# TOKEN ENCRYPTION (identical logic to db_firestore.py)
+# TOKEN ENCRYPTION
 # =============================================================================
 
 def _get_token_cipher(required: bool = False) -> Optional[Fernet]:
@@ -92,11 +102,6 @@ def decrypt_canvas_token(stored_value: str) -> Optional[str]:
 # INITIALIZATION
 # =============================================================================
 
-def init_firebase():
-    """Backward-compatible alias (imported by auth.py). Delegates to init_db."""
-    init_db()
-
-
 def get_db() -> Client:
     """Return the initialized Supabase client."""
     global _supabase_client
@@ -115,10 +120,25 @@ def normalize_canvas_url(api_url: str) -> str:
     return (api_url or "").strip().lower().rstrip("/")
 
 
+def build_canvas_account_key(api_url: str, canvas_user_id: str) -> str:
+    """
+    Build a stable, non-reversible key identifying a Canvas *account* (a given
+    Canvas user on a given instance). This is the correct scope for user data.
+
+    Crucially this depends ONLY on stable identifiers (instance URL + Canvas
+    user id), never on the OAuth access token. Access tokens rotate roughly
+    hourly; deriving the data-scoping key from the token (the previous design)
+    orphaned every row on each refresh. See docs/OIT_READINESS_AUDIT.md (R2).
+    """
+    raw = f"{normalize_canvas_url(api_url)}|{(str(canvas_user_id) or '').strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
 def build_canvas_credential_key(api_url: str, token: str) -> str:
     """
-    Build a stable, non-reversible key representing a Canvas credential pair.
-    Used to scope data to the currently connected Canvas token.
+    DEPRECATED token-derived scope key. Retained only so the one-time migration
+    can recompute/repair historical rows. Do NOT use for new scoping; use
+    build_canvas_account_key() instead.
     """
     raw = f"{normalize_canvas_url(api_url)}|{(token or '').strip()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
@@ -126,16 +146,82 @@ def build_canvas_credential_key(api_url: str, token: str) -> str:
 
 def delete_all_user_data(user_id: str) -> None:
     """
-    Revoke Canvas OAuth tokens and delete the user row (cascades to all child tables).
-    Also clears rate-limit buckets for this user.
+    Revoke Canvas OAuth tokens, delete storage objects, and delete the user row
+    (cascades to all child tables). Also clears rate-limit buckets.
     """
     from canvas_token_service import revoke_canvas_tokens
 
     revoke_canvas_tokens(user_id)
+    try:
+        from storage import delete_user_storage
+        delete_user_storage(user_id)
+    except Exception as exc:
+        logger.warning("Storage purge on delete failed for user %s: %s", user_id, exc)
     db = get_db()
     db.table("rate_limits").delete().eq("user_id", user_id).execute()
     db.table("users").delete().eq("id", user_id).execute()
     logger.info("Deleted all data for user %s", user_id)
+
+
+def _sanitize_export_row(table: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip debug/raw payloads from export unless explicitly enabled in production."""
+    from app_config import STORE_RAW_CANVAS_JSON
+
+    cleaned = dict(row)
+    if table == "ai_usage_logs":
+        raw = cleaned.get("raw_json")
+        if isinstance(raw, dict):
+            cleaned["raw_json"] = {
+                k: raw.get(k)
+                for k in ("operation", "model", "status", "input_tokens", "output_tokens")
+                if k in raw
+            }
+        else:
+            cleaned["raw_json"] = None
+    if not STORE_RAW_CANVAS_JSON:
+        cleaned.pop("raw_canvas_json", None)
+        cleaned.pop("raw_json", None)
+    return cleaned
+
+
+def export_all_user_data(user_id: str) -> Dict[str, Any]:
+    """
+    Assemble a portable export of everything we store about a user (data
+    portability / right of access). Excludes encrypted Canvas token material —
+    secrets are never exported. See docs/OIT_READINESS_AUDIT.md (R7).
+    """
+    db = get_db()
+
+    user = get_user(user_id) or {}
+    # Safe profile subset (no token ciphertext, no internal encryption columns).
+    profile = {
+        "id": user.get("id"),
+        "email": user.get("email"),
+        "name": user.get("name"),
+        "canvas_user_id": user.get("canvasUserId"),
+        "canvas_api_url": user.get("canvasApiUrl"),
+        "legal_consent_at": user.get("legalConsentAt"),
+        "legal_consent_version": user.get("legalConsentVersion"),
+        "created_at": user.get("createdAt"),
+    }
+
+    export: Dict[str, Any] = {
+        "exported_at": now_iso(),
+        "schema": "canvassync.user_export.v1",
+        "profile": profile,
+        "preferences": get_user_preferences(user_id),
+    }
+
+    for table in ("courses", "assignments", "announcements",
+                  "course_file_texts", "syllabus_rules", "ai_usage_logs"):
+        try:
+            rows = db.table(table).select("*").eq("user_id", user_id).execute().data or []
+        except Exception as exc:
+            logger.warning("export: failed to read %s for user %s: %s", table, user_id, exc)
+            rows = []
+        export[table] = [_sanitize_export_row(table, row) for row in rows]
+
+    return export
 
 
 def init_db():
@@ -269,6 +355,57 @@ def consume_hourly_rate_limit(user_id: str, limit_key: str, limit_per_hour: int)
     }
 
 
+def consume_sync_spacing(user_id: str, min_seconds: int) -> Dict[str, Any]:
+    """
+    Distributed minimum spacing between course syncs. Allows at most one sync per
+    `min_seconds` window, recorded in the shared rate_limits table so the limit
+    holds across autoscaled instances (replacing the old per-process dict). R9.
+    """
+    if not min_seconds or min_seconds <= 0:
+        return {"allowed": True, "retry_after_seconds": 0}
+
+    db = get_db()
+    now = datetime.now(timezone.utc)
+    epoch = int(now.timestamp())
+    bucket = epoch - (epoch % int(min_seconds))
+    retry_after = max(1, (bucket + int(min_seconds)) - epoch)
+    window_iso = datetime.fromtimestamp(bucket, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    bucket_id = f"spacing-{bucket}"
+    limit_key = "course_sync_spacing"
+    now_ts = now_iso()
+
+    existing = (
+        db.table("rate_limits")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("limit_key", limit_key)
+        .eq("bucket_id", bucket_id)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        return {"allowed": False, "retry_after_seconds": retry_after}
+
+    try:
+        resp = db.table("rate_limits").insert({
+            "user_id": user_id,
+            "limit_key": limit_key,
+            "time_window": window_iso,
+            "bucket_id": bucket_id,
+            "count": 1,
+            "limit_value": 1,
+            "created_at": now_ts,
+            "updated_at": now_ts,
+        }).execute()
+        if resp.data:
+            return {"allowed": True, "retry_after_seconds": 0}
+    except Exception:
+        # Unique-constraint collision: another instance won this window.
+        return {"allowed": False, "retry_after_seconds": retry_after}
+
+    return {"allowed": False, "retry_after_seconds": retry_after}
+
+
 # =============================================================================
 # USER OPERATIONS
 # =============================================================================
@@ -365,6 +502,7 @@ def _user_row_to_dict(row: Dict) -> Dict:
         "completedItems": row.get("completed_items") or {},
         "legalConsentAt": row.get("legal_consent_at"),
         "legalConsentVersion": row.get("legal_consent_version"),
+        "sessionVersion": row.get("session_version", 0),
         "createdAt": row.get("created_at"),
         "lastLogin": row.get("last_login"),
         "updatedAt": row.get("updated_at"),
@@ -375,25 +513,70 @@ LEGAL_CONSENT_VERSION = os.getenv("LEGAL_CONSENT_VERSION", "2026-05-20")
 
 
 def user_has_legal_consent(user_id: str) -> bool:
+    dev_record = _DEV_LEGAL_CONSENTS.get(str(user_id))
+    if dev_record:
+        recorded = (dev_record.get("legal_consent_version") or "").strip()
+        if dev_record.get("legal_consent_at") and recorded == LEGAL_CONSENT_VERSION:
+            return True
+
     user = get_user(user_id)
     if not user:
         return False
-    return bool(user.get("legalConsentAt"))
+    if not user.get("legalConsentAt"):
+        return False
+    recorded = (user.get("legalConsentVersion") or "").strip()
+    return recorded == LEGAL_CONSENT_VERSION
+
+
+def get_user_session_version(user_id: str) -> int:
+    user = get_user(user_id)
+    if not user:
+        return 0
+    try:
+        return int(user.get("sessionVersion") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def increment_user_session_version(user_id: str) -> int:
+    """Bump session version to invalidate all outstanding session JWTs."""
+    db = get_db()
+    current = get_user_session_version(user_id)
+    new_version = current + 1
+    db.table("users").update({
+        "session_version": new_version,
+        "updated_at": now_iso(),
+    }).eq("id", user_id).execute()
+    return new_version
 
 
 def record_user_legal_consent(user_id: str, version: str = None) -> Dict[str, Any]:
     db = get_db()
     now_ts = now_iso()
     consent_version = (version or LEGAL_CONSENT_VERSION).strip()
-    db.table("users").update({
-        "legal_consent_at": now_ts,
-        "legal_consent_version": consent_version,
-        "updated_at": now_ts,
-    }).eq("id", user_id).execute()
-    return {
+    record = {
         "legal_consent_at": now_ts,
         "legal_consent_version": consent_version,
     }
+    try:
+        db.table("users").update({
+            "legal_consent_at": now_ts,
+            "legal_consent_version": consent_version,
+            "updated_at": now_ts,
+        }).eq("id", user_id).execute()
+    except Exception as exc:
+        if not IS_PRODUCTION and _is_legal_consent_schema_error(exc):
+            logger.warning(
+                "Supabase users table is missing legal consent columns; using an in-memory "
+                "development fallback. Apply backend/migrations/004_user_legal_consent.sql "
+                "before production."
+            )
+            _DEV_LEGAL_CONSENTS[str(user_id)] = record
+            return record
+        raise
+
+    _DEV_LEGAL_CONSENTS[str(user_id)] = record
+    return record
 
 
 def update_user_last_login(user_id: str):
@@ -438,9 +621,12 @@ def update_user_preferences(
 
 
 def update_user_canvas_credentials(user_id: str, api_url: str, token: str) -> str:
-    """Store Canvas API credentials for a user."""
+    """Store Canvas API credentials for a user (legacy PAT path — dev only)."""
     db = get_db()
-    credential_key = build_canvas_credential_key(api_url, token)
+    user = get_user(user_id) or {}
+    credential_key = user.get("canvasCredentialKey") or build_canvas_account_key(
+        api_url, user.get("canvasUserId") or user_id
+    )
     stored_token = encrypt_canvas_token(token)
 
     db.table("users").update({
@@ -464,7 +650,13 @@ def update_user_canvas_oauth_credentials(
     Persist Canvas OAuth credentials so OAuth login alone can sync data.
     """
     db = get_db()
-    credential_key = build_canvas_credential_key(api_url, access_token)
+    # Stable account-scoped key: derive from the Canvas account identity, not
+    # the rotating access token. Reuse the existing key if already set so it
+    # never changes across token refreshes.
+    existing = get_user(user_id) or {}
+    credential_key = existing.get("canvasCredentialKey") or build_canvas_account_key(
+        api_url, existing.get("canvasUserId") or user_id
+    )
     stored_access_token = encrypt_canvas_token(access_token)
     stored_refresh_token = encrypt_canvas_token(refresh_token) if refresh_token else None
 
@@ -1492,6 +1684,144 @@ def get_all_ai_usage_logs(
             break
 
     return logs
+
+
+# =============================================================================
+# RETENTION / PURGE (docs/OIT_READINESS_AUDIT.md, R4)
+# =============================================================================
+
+def _cutoff_iso(days: int) -> Optional[str]:
+    """ISO timestamp `days` in the past, or None when retention is disabled (<=0)."""
+    if not days or days <= 0:
+        return None
+    cutoff = datetime.now(timezone.utc) - timedelta(days=int(days))
+    return cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _delete_older_than(table: str, column: str, cutoff_iso: str) -> int:
+    """Delete rows where `column` < cutoff_iso. Returns number deleted."""
+    db = get_db()
+    resp = db.table(table).delete().lt(column, cutoff_iso).execute()
+    return len(resp.data) if resp.data else 0
+
+
+def purge_course_file_texts_older_than(days: int) -> int:
+    cutoff = _cutoff_iso(days)
+    if not cutoff:
+        return 0
+    db = get_db()
+    try:
+        rows = (
+            db.table("course_file_texts")
+            .select("id,storage_path")
+            .lt("created_at", cutoff)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.warning("purge course_file_texts list failed: %s", exc)
+        rows = []
+    storage_paths = [r["storage_path"] for r in rows if r.get("storage_path")]
+    if storage_paths:
+        try:
+            from storage import delete_storage_paths
+            delete_storage_paths(storage_paths)
+        except Exception as exc:
+            logger.warning("purge course_file_texts storage delete failed: %s", exc)
+    return _delete_older_than("course_file_texts", "created_at", cutoff)
+
+
+def purge_assignments_older_than(days: int) -> int:
+    cutoff = _cutoff_iso(days)
+    if not cutoff:
+        return 0
+    return _delete_older_than("assignments", "synced_at", cutoff)
+
+
+def purge_courses_older_than(days: int) -> int:
+    cutoff = _cutoff_iso(days)
+    if not cutoff:
+        return 0
+    return _delete_older_than("courses", "synced_at", cutoff)
+
+
+def purge_syllabus_rules_older_than(days: int) -> int:
+    cutoff = _cutoff_iso(days)
+    if not cutoff:
+        return 0
+    return _delete_older_than("syllabus_rules", "extracted_at", cutoff)
+
+
+def purge_inactive_user_content(days: int) -> dict:
+    """
+    Purge synced content for users whose last_login is older than `days`.
+    Does not delete user accounts or OAuth credentials.
+    """
+    cutoff = _cutoff_iso(days)
+    if not cutoff:
+        return {"users": 0, "tables": {}}
+
+    db = get_db()
+    try:
+        stale_users = (
+            db.table("users")
+            .select("id")
+            .lt("last_login", cutoff)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        logger.warning("inactive user list failed: %s", exc)
+        return {"users": 0, "tables": {}, "error": str(exc)}
+
+    user_ids = [str(u["id"]) for u in stale_users if u.get("id")]
+    if not user_ids:
+        return {"users": 0, "tables": {}}
+
+    tables = (
+        "assignments",
+        "announcements",
+        "course_file_texts",
+        "syllabus_rules",
+        "courses",
+        "ai_usage_logs",
+    )
+    counts: Dict[str, int] = {}
+    for table in tables:
+        deleted = 0
+        for uid in user_ids:
+            try:
+                resp = db.table(table).delete().eq("user_id", uid).execute()
+                deleted += len(resp.data) if resp.data else 0
+            except Exception as exc:
+                logger.warning("inactive purge %s for %s failed: %s", table, uid, exc)
+        counts[table] = deleted
+
+    for uid in user_ids:
+        try:
+            from storage import delete_user_storage
+            delete_user_storage(uid)
+        except Exception as exc:
+            logger.warning("inactive storage purge for %s failed: %s", uid, exc)
+
+    return {"users": len(user_ids), "tables": counts}
+
+
+def purge_announcements_older_than(days: int) -> int:
+    cutoff = _cutoff_iso(days)
+    if not cutoff:
+        return 0
+    # announcements have no created_at; posted_at (ISO text) is the post date.
+    return _delete_older_than("announcements", "posted_at", cutoff)
+
+
+def purge_ai_usage_logs_older_than(days: int) -> int:
+    cutoff = _cutoff_iso(days)
+    if not cutoff:
+        return 0
+    return _delete_older_than("ai_usage_logs", "created_at", cutoff)
 
 
 # =============================================================================

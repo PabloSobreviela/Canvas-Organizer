@@ -13,7 +13,8 @@
 |------|--------|-------|
 | OAuth for multi-user | **Compliant** (after fixes) | OAuth primary; PAT disabled in cloud prod |
 | Token storage | **Compliant** | Server-side Fernet encryption |
-| Tokens in URLs | **Fixed** | Session cookie; no JWT in redirect |
+| Session in URL | **Fixed** | HttpOnly cookie; no JWT in redirect |
+| Session revocation | **Fixed** | `session_version` bumped on logout; cookie-only in production |
 | Refresh tokens | **Fixed** | Auto-refresh before Canvas API calls |
 | Revoke on logout | **Fixed** | `DELETE /login/oauth2/token` + DB wipe |
 | Manual PAT UX | **Mitigated** | Off in prod; API rejects body tokens |
@@ -79,6 +80,7 @@ Canvas documents `DELETE /login/oauth2/token`.
 | T7 | Data minimization | Retention cleanup API; privacy doc |
 | T8 | Transparency | `docs/INSTITUTIONAL_COMPLIANCE.md` |
 | T9 | Registered dev key | GT instance URL in env |
+| T10 | Scoped OAuth | `CANVAS_OAUTH_SCOPES` on authorize URL |
 
 ---
 

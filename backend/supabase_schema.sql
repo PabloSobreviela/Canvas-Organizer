@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
     completed_items JSONB DEFAULT '{}',
     legal_consent_at TIMESTAMPTZ,
     legal_consent_version TEXT,
+    session_version INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     last_login TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()

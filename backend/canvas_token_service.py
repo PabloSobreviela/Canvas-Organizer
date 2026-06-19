@@ -16,7 +16,7 @@ from db_supabase import (
     get_user,
     update_user_canvas_oauth_credentials,
     now_iso,
-    build_canvas_credential_key,
+    build_canvas_account_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,10 +41,11 @@ def _parse_expires_at(value: str | None) -> datetime | None:
         return None
 
 
-def _needs_refresh(expires_at: str | None) -> bool:
+def _needs_refresh(expires_at: str | None, refresh_token: str | None = None) -> bool:
     exp = _parse_expires_at(expires_at)
     if not exp:
-        return False
+        # Missing expiry — refresh if we have a refresh token (Canvas tokens expire ~1h).
+        return bool(refresh_token)
     if exp.tzinfo is None:
         exp = exp.replace(tzinfo=timezone.utc)
     return datetime.now(timezone.utc) >= (exp - timedelta(seconds=TOKEN_REFRESH_BUFFER_SECONDS))
@@ -142,7 +143,7 @@ def get_valid_canvas_credentials(user_id: str) -> dict | None:
     if not access_token:
         return None
 
-    if _needs_refresh(expires_at) and refresh_token:
+    if _needs_refresh(expires_at, refresh_token) and refresh_token:
         token_data = refresh_canvas_access_token(user_id, api_url, refresh_token)
         if token_data and token_data.get("access_token"):
             access_token = token_data["access_token"]
@@ -165,11 +166,13 @@ def get_valid_canvas_credentials(user_id: str) -> dict | None:
             )
             expires_at = new_expires
 
-    credential_key = user.get("canvasCredentialKey") or build_canvas_credential_key(api_url, access_token)
+    # Stable account-scoped key (never derived from the rotating token).
+    credential_key = user.get("canvasCredentialKey") or build_canvas_account_key(
+        api_url, user.get("canvasUserId") or user_id
+    )
     return {
         "api_url": api_url,
         "token": access_token,
-        "encrypted_token": access_token,
         "canvas_credential_key": credential_key,
         "canvas_token_expires_at": expires_at,
     }

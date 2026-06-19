@@ -1,9 +1,8 @@
 // Canvas OAuth Authentication
-// Session via HttpOnly cookie on API domain (credentials: 'include')
+// Session via HttpOnly cookie on API domain (credentials: 'include' only).
 
 import { API_BASE } from "./config";
 
-const TOKEN_STORAGE_KEY = 'canvassync_session_token';
 const USER_STORAGE_KEY = 'canvassync_user';
 const DEMO_TOKEN_STORAGE_KEY = 'canvassync_demo_token';
 const DEMO_USER_STORAGE_KEY = 'canvassync_demo_user';
@@ -11,23 +10,15 @@ const DEMO_USER_STORAGE_KEY = 'canvassync_demo_user';
 let _authChangeCallbacks = [];
 let _currentUser = null;
 let _initialized = false;
-let _memoryToken = null;
 
 function _parseJwtPayload(token) {
   try {
     const base64Url = token.split('.')[1];
     const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const payload = JSON.parse(atob(base64));
-    return payload;
+    return JSON.parse(atob(base64));
   } catch {
     return null;
   }
-}
-
-function _isTokenExpired(token) {
-  const payload = _parseJwtPayload(token);
-  if (!payload || !payload.exp) return true;
-  return Date.now() >= payload.exp * 1000;
 }
 
 export function isDemoJwt(token) {
@@ -39,53 +30,19 @@ function _notifyAuthChange(user) {
   _currentUser = user;
   for (const cb of _authChangeCallbacks) {
     try {
-      cb({ user: user || null, token: user ? getStoredToken() : null });
+      cb({ user: user || null, token: null });
     } catch (e) {
       console.error('Auth change callback error:', e);
     }
   }
 }
 
-function _storeSession(token, user) {
-  _memoryToken = token;
+function _clearCachedUser() {
   try {
-    localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
-  } catch {
-    // Storage unavailable
-  }
-}
-
-function _clearSession() {
-  _memoryToken = null;
-  try {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
     localStorage.removeItem(USER_STORAGE_KEY);
   } catch {
     // Storage unavailable
   }
-}
-
-function getStoredToken() {
-  if (_memoryToken && !_isTokenExpired(_memoryToken)) {
-    return _memoryToken;
-  }
-  try {
-    const token = localStorage.getItem(TOKEN_STORAGE_KEY);
-    if (token && !_isTokenExpired(token)) {
-      if (isDemoJwt(token)) {
-        _clearSession();
-        return null;
-      }
-      _memoryToken = token;
-      return token;
-    }
-    if (token && _isTokenExpired(token)) {
-      _clearSession();
-    }
-  } catch {
-    // Storage unavailable
-  }
-  return null;
 }
 
 export function storeDemoSession(token, user) {
@@ -100,13 +57,14 @@ export function storeDemoSession(token, user) {
 export function getDemoToken() {
   try {
     const token = sessionStorage.getItem(DEMO_TOKEN_STORAGE_KEY);
-    if (token && !_isTokenExpired(token)) {
-      return token;
-    }
-    if (token && _isTokenExpired(token)) {
+    if (!token) return null;
+    const payload = _parseJwtPayload(token);
+    if (!payload?.exp) return token;
+    if (Date.now() >= payload.exp * 1000) {
       clearDemoSession();
+      return null;
     }
-    return null;
+    return token;
   } catch {
     return null;
   }
@@ -132,14 +90,6 @@ export function clearDemoSession() {
 
 export function purgeDemoAuthArtifacts() {
   clearDemoSession();
-  try {
-    const mainToken = localStorage.getItem(TOKEN_STORAGE_KEY);
-    if (mainToken && isDemoJwt(mainToken)) {
-      _clearSession();
-    }
-  } catch {
-    // Storage unavailable
-  }
 }
 
 async function fetchSessionFromServer() {
@@ -157,9 +107,10 @@ async function fetchSessionFromServer() {
     return {
       uid: data.user_id,
       email: data.email,
-      displayName: data.name,
+      name: data.name,
       canvasInstanceUrl: data.canvas_instance_url || null,
       legalConsentAccepted: Boolean(data.legal_consent_accepted),
+      legalConsentCurrent: data.legal_consent_current !== false,
     };
   } catch {
     return null;
@@ -189,18 +140,8 @@ export async function initAuth() {
       // Storage unavailable
     }
   } else {
-    const token = getStoredToken();
-    if (token) {
-      const payload = _parseJwtPayload(token);
-      if (payload) {
-        _currentUser = {
-          uid: payload.sub,
-          email: payload.email,
-          displayName: payload.name,
-          canvasInstanceUrl: payload.canvas_instance_url,
-        };
-      }
-    }
+    _currentUser = null;
+    _clearCachedUser();
   }
 
   _notifyAuthChange(_currentUser);
@@ -212,33 +153,30 @@ export function signInWithCanvas() {
 
 export async function logout() {
   try {
-    const token = getStoredToken();
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
     await fetch(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
-      headers,
       credentials: 'include',
     }).catch(() => {});
   } finally {
-    _clearSession();
+    _clearCachedUser();
     _currentUser = null;
     _notifyAuthChange(null);
   }
 }
 
 export async function getAuthToken() {
-  return getStoredToken();
+  return null;
 }
 
 export function isAuthenticated() {
-  return !!_currentUser || !!getStoredToken();
+  return !!_currentUser;
 }
 
 export function onAuthChange(callback) {
   _authChangeCallbacks.push(callback);
   callback({
     user: _currentUser,
-    token: getStoredToken(),
+    token: null,
   });
   return () => {
     _authChangeCallbacks = _authChangeCallbacks.filter(cb => cb !== callback);
@@ -250,12 +188,10 @@ export function getCurrentUser() {
 }
 
 export function apiFetchOptions(extra = {}) {
-  const token = getStoredToken();
-  const headers = {
-    ...(extra.headers || {}),
-  };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
+  const headers = { ...(extra.headers || {}) };
+  const demoToken = getDemoToken();
+  if (demoToken && !headers.Authorization) {
+    headers.Authorization = `Bearer ${demoToken}`;
   }
   return {
     ...extra,
@@ -266,13 +202,8 @@ export function apiFetchOptions(extra = {}) {
 
 export const auth = {
   get currentUser() {
-    const user = getCurrentUser();
-    if (!user) return null;
-    return {
-      ...user,
-      getIdToken: async () => getStoredToken(),
-    };
-  }
+    return getCurrentUser();
+  },
 };
 
 export default { auth, initAuth };

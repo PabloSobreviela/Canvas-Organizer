@@ -1,9 +1,40 @@
 {
-  "buildCommand": "cd frontend && CI=false npm run build",
+  "buildCommand": "cd frontend && CI=false DISABLE_ESLINT_PLUGIN=true npm run build",
   "outputDirectory": "frontend/build",
   "installCommand": "cd frontend && npm install",
   "framework": null,
   "rewrites": [
+    { "source": "/ui1", "destination": "/404.html" },
+    { "source": "/ui1/(.*)", "destination": "/404.html" },
+    { "source": "/ui2", "destination": "/404.html" },
+    { "source": "/ui2/(.*)", "destination": "/404.html" },
+    { "source": "/ui3", "destination": "/404.html" },
+    { "source": "/ui3/(.*)", "destination": "/404.html" },
+    { "source": "/ui4", "destination": "/404.html" },
+    { "source": "/ui4/(.*)", "destination": "/404.html" },
+    { "source": "/ui5", "destination": "/404.html" },
+    { "source": "/ui5/(.*)", "destination": "/404.html" },
+    { "source": "/ui6", "destination": "/404.html" },
+    { "source": "/ui6/(.*)", "destination": "/404.html" },
+    { "source": "/ui7", "destination": "/404.html" },
+    { "source": "/ui7/(.*)", "destination": "/404.html" },
+    { "source": "/ui8", "destination": "/404.html" },
+    { "source": "/ui8/(.*)", "destination": "/404.html" },
     { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Strict-Transport-Security", "value": "max-age=31536000; includeSubDomains" },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        }
+      ]
+    }
   ]
 }
