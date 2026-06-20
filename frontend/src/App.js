@@ -34,7 +34,6 @@ import { ConsentModal } from "./components/ConsentModal";
 import { LegalFooter } from "./components/LegalFooter";
 import { MobileNotice } from "./components/MobileNotice";
 import { sileo, Toaster } from "sileo";
-import "sileo/styles.css";
 
 // GT-first default timezone, overridable for future non-GT tenants.
 const COURSE_TIMEZONE = process.env.REACT_APP_DEFAULT_COURSE_TIMEZONE || "America/New_York";
