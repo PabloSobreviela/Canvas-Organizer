@@ -143,14 +143,20 @@ Required evidence:
 
 ### Current technical state as of this document
 
-- Deprecated Supabase demo/application rows were cleared.
-- Consolidated migration `backend/migrations/010_compliance_state.sql` is
-  prepared to add consent/session columns, enforce deny-direct RLS policies,
-  create retention indexes, and remove the obsolete empty AI telemetry table.
-- The Supabase dashboard was awaiting final destructive-query confirmation when
-  this document was prepared.
-- CSRF and deletion/revocation reliability fixes are implemented in the current
-  worktree but are not production facts until deployed and verified.
+- Deprecated Supabase rows and private-storage objects are absent.
+- Migration `backend/migrations/010_compliance_state.sql` is applied and
+  verified: three consent/session columns, seven RLS-enabled tables, seven
+  deny-direct policies, zero browser-role table grants, 28 service-role CRUD
+  grants, six retention indexes, and no AI telemetry table.
+- CSRF, deletion/revocation reliability, direct-DeepInfra enforcement, and
+  versioned legal consent are deployed on Cloud Run revision
+  `canvas-organizer-backend-00115-lcz`.
+- The canonical Vercel alias serves policy version `2026-06-20`, contact
+  `pablo3@gatech.edu`, browser-storage disclosure, 18+ eligibility, and the
+  direct-DeepInfra disclosure.
+- Automated deployment verification passed 19 of 19 checks.
+- The private retention job uses the same backend image and completed
+  successfully after deployment.
 - A dedicated DeepInfra key is stored in Google Secret Manager.
 - A live synchronous call to
   `https://api.deepinfra.com/v1/openai/chat/completions` succeeded with
@@ -158,8 +164,8 @@ Required evidence:
 - Georgia Tech OAuth credentials remain placeholders, so the deployed login
   correctly fails closed.
 
-**Exit gate:** All applicable changes are deployed and the verification report
-contains no unresolved technical misstatement.
+**Exit gate:** Passed for a process inquiry and development-key review draft.
+This does not replace the real GT OAuth/staging tests required before a pilot.
 
 ## 6. Stage 1 â€” Local process inquiry
 
@@ -455,18 +461,22 @@ Canvas tool.
 - Explain that this is a local GT root-account decision, not global Instructure
   certification.
 
-### Not ready until final remediation/deployment verification
+### Ready as a development-review draft
 
-- Claim that the current production site has all database/security fixes live.
-- Begin a real-user pilot.
-- Request unconditional general-production approval.
+- Share the current Terms, Privacy Policy, architecture, scope matrix, security
+  controls, and post-reconciliation audit.
+- Ask GT what exact staging callback/environment and sponsorship are required
+  before key issuance.
 
-### Ready after Stage 0 is deployed
+### Not ready for
 
-Once migration 010 is applied, the current worktree is deployed, and live
-verification passes, the development-key package is technically credible. The
-remaining decision is institutional: Georgia Tech must identify the local
-student-app process and issue the key.
+- a real-user OAuth pilot;
+- a production Developer Key;
+- a claim of Georgia Tech approval or endorsement; or
+- unconditional use of AI with GT Canvas data.
+
+Those remain blocked on GT's written process decision, a development key,
+staging OAuth evidence, and any AI/security/accessibility conditions.
 
 ## 15. Primary sources
 

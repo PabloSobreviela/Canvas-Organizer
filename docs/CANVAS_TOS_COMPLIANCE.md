@@ -21,7 +21,7 @@ References:
 | Local credential removal | Implemented |
 | Remote revocation | Attempted and HTTP success checked; real GT test pending |
 | Scoped read-only access | Implemented; GT scope approval pending |
-| Consent/re-consent | Implemented; requires migration 010 in each environment |
+| Consent/re-consent | Implemented; migration 010 verified in production |
 | API minimization/retention | Implemented |
 | AI disclosure/labels | Implemented; institutional/path decision pending |
 | Developer Key | Not issued |

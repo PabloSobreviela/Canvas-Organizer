@@ -19,15 +19,18 @@ Developer API Key is created and managed by Georgia Tech's local Canvas
 root-account administrators; no global Instructure certification process is
 identified for this external OAuth REST client.
 
-## Phase 1 — Technical truth
+## Phase 1 — Technical truth (complete and verified)
 
-- Apply `backend/migrations/010_compliance_state.sql`.
-- Remove deprecated database data and the obsolete AI telemetry table.
-- Verify actual production RLS policies with database-owner access.
-- Keep OAuth fail-closed until GT issues a key.
-- Protect cookie-authenticated mutations against CSRF.
-- Keep current public Terms, Privacy, consent, architecture, and operations
-  documents aligned with deployed behavior.
+- Migration `010_compliance_state.sql` is applied in production.
+- Deprecated rows/storage and the obsolete AI telemetry table are absent.
+- Production grants, RLS, policies, indexes, and consent/session columns are
+  verified.
+- OAuth fails closed until GT issues a key.
+- Cookie-authenticated mutations enforce Origin plus custom-header CSRF.
+- Public Terms, Privacy, consent, architecture, and operations documents match
+  the deployed Vercel/Cloud Run/Supabase state.
+- Evidence is recorded in
+  `docs/POST_RECONCILIATION_AUDIT_2026-06-20.md`.
 
 ## Phase 2 — Development review
 

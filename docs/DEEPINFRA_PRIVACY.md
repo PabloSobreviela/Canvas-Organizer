@@ -13,7 +13,7 @@ course materials are not guaranteed anonymous and may still contain incidental
 identifying information.
 
 CanvasSync does not maintain a database of AI prompts, completions, costs, or
-token usage. The obsolete AI telemetry table is removed by
+token usage. The obsolete AI telemetry table was removed from production by
 `backend/migrations/010_compliance_state.sql`. Normal infrastructure security
 and request logs may still be retained by hosting and inference providers
 according to their configured policies.
