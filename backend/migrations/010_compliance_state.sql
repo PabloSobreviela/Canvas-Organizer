@@ -64,6 +64,7 @@ DROP POLICY IF EXISTS deny_direct_users ON public.users;
 DROP POLICY IF EXISTS deny_direct_courses ON public.courses;
 DROP POLICY IF EXISTS deny_direct_assignments ON public.assignments;
 DROP POLICY IF EXISTS deny_direct_course_file_texts ON public.course_file_texts;
+DROP POLICY IF EXISTS deny_direct_file_texts ON public.course_file_texts;
 DROP POLICY IF EXISTS deny_direct_announcements ON public.announcements;
 DROP POLICY IF EXISTS deny_direct_syllabus_rules ON public.syllabus_rules;
 DROP POLICY IF EXISTS deny_direct_rate_limits ON public.rate_limits;
