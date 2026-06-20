@@ -16,7 +16,7 @@ Common missing vars:
 - `CANVAS_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI`
 - `FRONTEND_URL`
 - `RATELIMIT_STORAGE_URI` (must not be `memory://` in production)
-- `LLM_API_KEY` (required for AI date extraction)
+- `DEEPINFRA_API_KEY` (required for direct AI date extraction)
 
 ## OAuth / "Sign in with Canvas" fails
 
@@ -77,14 +77,16 @@ timeout:
 
 ## Rate limit / sync throttled
 
-Per-user sync spacing and hourly caps use the shared store (`RATELIMIT_STORAGE_URI`).
-Ensure Redis/Upstash is reachable from Cloud Run.
+Course-sync spacing and hourly caps use the Supabase `rate_limits` table.
+Flask endpoint limits use `RATELIMIT_STORAGE_URI`; `memory://` is process-local.
+If a shared Redis-compatible URI is configured, verify it is reachable from
+Cloud Run before representing those endpoint limits as multi-instance safe.
 
 ## Verification harness
 
 ```bash
 python backend/tools/verify_deploy.py https://YOUR_BACKEND_URL \
-  --origin https://canvassync.app
+  --origin https://canvas-organizer.vercel.app
 ```
 
 See [`docs/PROD_VERIFICATION.md`](docs/PROD_VERIFICATION.md).

@@ -41,7 +41,7 @@ CANVAS_OAUTH_REDIRECT_URI = os.getenv("CANVAS_OAUTH_REDIRECT_URI", "")
 SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", "")
 CANVASSYNC_USER_AGENT = os.getenv(
     "CANVASSYNC_USER_AGENT",
-    "CanvasSync/1.0 (Georgia Tech student-built app; canvassync@gatech.edu)",
+    "CanvasSync/1.0 (Georgia Tech student-developed app; pablo3@gatech.edu)",
 )
 
 # Space-separated Canvas OAuth scopes (must be subset of developer key scopes).
@@ -59,6 +59,8 @@ _DEFAULT_CANVAS_SCOPES = " ".join([
     "url:GET|/api/v1/announcements",
 ])
 CANVAS_OAUTH_SCOPES = (os.getenv("CANVAS_OAUTH_SCOPES") or _DEFAULT_CANVAS_SCOPES).strip()
+APPROVED_DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+APPROVED_DEEPINFRA_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507"
 
 SESSION_TOKEN_EXPIRY_HOURS = int(os.getenv("SESSION_TOKEN_EXPIRY_HOURS", "24"))
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "canvassync_session")
@@ -155,9 +157,20 @@ def validate_production_secrets():
                 "Production is using explicitly approved temporary in-memory rate limits. "
                 "Configure a distributed RATELIMIT_STORAGE_URI before general launch."
             )
-        llm_key = (os.getenv("DEEPINFRA_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
+        llm_key = (os.getenv("DEEPINFRA_API_KEY") or "").strip()
         if _ai_enabled and (not llm_key or llm_key == "your-deepinfra-api-key"):
             missing.append("DEEPINFRA_API_KEY (direct DeepInfra key for AI date extraction)")
+        if _ai_enabled:
+            llm_base_url = (os.getenv("LLM_BASE_URL") or APPROVED_DEEPINFRA_BASE_URL).rstrip("/")
+            model_name = (os.getenv("MODEL_NAME") or APPROVED_DEEPINFRA_MODEL).strip()
+            if llm_base_url != APPROVED_DEEPINFRA_BASE_URL:
+                missing.append(
+                    f"LLM_BASE_URL (must be direct DeepInfra: {APPROVED_DEEPINFRA_BASE_URL})"
+                )
+            if model_name != APPROVED_DEEPINFRA_MODEL:
+                missing.append(
+                    f"MODEL_NAME (must be {APPROVED_DEEPINFRA_MODEL})"
+                )
 
     if missing:
         raise RuntimeError(
@@ -684,21 +697,34 @@ def canvas_oauth_logout():
     """Revoke Canvas tokens, invalidate session, clear session cookie."""
     from canvas_token_service import revoke_canvas_tokens
 
+    canvas_revocation_confirmed = True
+    session_invalidation_confirmed = True
     token = extract_session_token()
     if token:
         payload = _decode_session_jwt(token)
         if payload and payload.get("sub"):
             user_id = str(payload["sub"])
             try:
-                revoke_canvas_tokens(user_id)
+                canvas_revocation_confirmed = revoke_canvas_tokens(user_id)
             except Exception as exc:
+                canvas_revocation_confirmed = False
                 logger.warning("Canvas revoke on logout failed: %s", exc)
             try:
                 increment_user_session_version(user_id)
             except Exception as exc:
+                session_invalidation_confirmed = False
                 logger.warning("Session version bump on logout failed: %s", exc)
 
-    resp = make_response(jsonify({"message": "Logged out successfully"}))
+    status = 200 if session_invalidation_confirmed else 503
+    resp = make_response(jsonify({
+        "message": (
+            "Logged out successfully"
+            if status == 200
+            else "Local cookie cleared, but server-side session invalidation could not be confirmed."
+        ),
+        "canvas_revocation_confirmed": canvas_revocation_confirmed,
+        "session_invalidation_confirmed": session_invalidation_confirmed,
+    }), status)
     clear_session_cookie(resp)
     return resp
 

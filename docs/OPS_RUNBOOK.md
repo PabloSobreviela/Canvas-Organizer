@@ -1,7 +1,8 @@
 # CanvasSync Operations Runbook
 
 Operational procedures for running CanvasSync in production (Google Cloud Run +
-Supabase + direct DeepInfra). Companion to `docs/OIT_READINESS_AUDIT.md`.
+Supabase + optional direct DeepInfra). The current source of truth for review is
+`docs/OIT_SUBMISSION.md`.
 
 ---
 
@@ -37,7 +38,7 @@ Optional but recommended:
 | `COURSE_RETENTION_DAYS` | `180` | Retention for course metadata rows |
 | `SYLLABUS_RULES_RETENTION_DAYS` | `180` | Retention for syllabus rules |
 | `INACTIVE_USER_CONTENT_PURGE_DAYS` | `180` | Purge synced content for inactive users |
-| `ENABLE_AI_RESOLVE` | `true` | Enable direct DeepInfra date extraction |
+| `ENABLE_AI_RESOLVE` | `false` in review environments | Enable direct DeepInfra date extraction |
 | `LLM_BASE_URL` | `https://api.deepinfra.com/v1/openai` | Direct DeepInfra endpoint |
 | `MODEL_NAME` | `Qwen/Qwen3-235B-A22B-Instruct-2507` | Fixed inference model |
 
@@ -107,8 +108,9 @@ Indexes supporting efficient purges: `backend/migrations/006_retention_indexes.s
 
 ### 4.2 User data deletion / disconnect requests
 - Self-service: users use **Settings → Your data → Export / Delete**.
-- Operator: `POST /api/user/delete-data` (full erasure, cascades + revokes) or
-  `POST /api/user/disconnect-canvas` (revoke tokens, keep content).
+- Operator: `POST /api/user/delete-data` (active app-data erasure, local
+  credential removal, remote revocation attempt) or
+  `POST /api/user/disconnect-canvas` (remove credentials, keep content).
 - Deletion removes the `users` row, which cascades to content tables, purges Supabase
   Storage objects under `{user_id}/`, and (via trigger
   `migrations/007_rate_limits_cascade.sql`) purges rate-limit buckets.
@@ -120,9 +122,11 @@ database, store the URI in Secret Manager as `ratelimit-storage-uri`, and redepl
 The deploy script does not provision Redis automatically.
 
 ### 4.3 Abuse / runaway syncs
-- Per-user spacing (`MIN_SECONDS_BETWEEN_COURSE_SYNCS`) and hourly caps
-  (`COURSE_SYNC_RATE_LIMIT_PER_HOUR`) are enforced in the shared store, so they
-  hold across instances. Tighten via env + redeploy.
+- Per-user spacing (`MIN_SECONDS_BETWEEN_COURSE_SYNCS`) and hourly course-sync
+  caps (`COURSE_SYNC_RATE_LIMIT_PER_HOUR`) use the Supabase `rate_limits` table.
+- Flask-Limiter endpoint caps are multi-instance safe only when
+  `RATELIMIT_STORAGE_URI` uses a shared Redis-compatible store. With `memory://`
+  they are process-local and reset on restart.
 - Platform-level: use the rate limiter (`RATELIMIT_STORAGE_URI`) and Cloud Run
   max-instances / concurrency limits.
 
@@ -143,7 +147,9 @@ python migrations/005_repair_account_keys.py --dry-run
 python migrations/005_repair_account_keys.py
 ```
 
-Apply `008_session_version.sql` for server-side session revocation support.
+Apply `010_compliance_state.sql`; it consolidates consent/session columns,
+deny-direct RLS policies, retention indexes, and removal of the obsolete AI
+telemetry table.
 
 ---
 

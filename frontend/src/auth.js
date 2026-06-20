@@ -156,6 +156,7 @@ export async function logout() {
     await fetch(`${API_BASE}/api/auth/logout`, {
       method: 'POST',
       credentials: 'include',
+      headers: { 'X-CanvasSync-CSRF': '1' },
     }).catch(() => {});
   } finally {
     _clearCachedUser();
@@ -189,6 +190,10 @@ export function getCurrentUser() {
 
 export function apiFetchOptions(extra = {}) {
   const headers = { ...(extra.headers || {}) };
+  const method = String(extra.method || "GET").toUpperCase();
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(method) && !headers["X-CanvasSync-CSRF"]) {
+    headers["X-CanvasSync-CSRF"] = "1";
+  }
   const demoToken = getDemoToken();
   if (demoToken && !headers.Authorization) {
     headers.Authorization = `Bearer ${demoToken}`;

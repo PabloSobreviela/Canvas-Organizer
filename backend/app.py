@@ -74,7 +74,12 @@ if CLOUD_MODE:
         get_course_sync_version, increment_course_sync_version,
         cleanup_old_file_versions,
     )
-    from auth import require_auth, optional_auth, clear_session_cookie
+    from auth import (
+        require_auth,
+        optional_auth,
+        clear_session_cookie,
+        SESSION_COOKIE_NAME,
+    )
     logger.info("MODE: CLOUD (Supabase + Canvas OAuth)")
 else:
     # Local mode: Use SQLite (legacy)
@@ -333,7 +338,9 @@ def _apply_cors_headers(response):
         response.headers["Access-Control-Allow-Credentials"] = "true"
 
         # Fixed allowlist; do not echo client-requested headers (security)
-        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        response.headers["Access-Control-Allow-Headers"] = (
+            "Authorization, Content-Type, X-CanvasSync-CSRF"
+        )
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         response.headers["Access-Control-Max-Age"] = "600"
     except Exception:
@@ -346,7 +353,7 @@ CORS(
     app,
     origins=allowed_origins,
     supports_credentials=True,
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-CanvasSync-CSRF"],
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
 )
 
@@ -380,6 +387,40 @@ def handle_cors_preflight():
             logger.warning("CORS: Blocked preflight origin=%s path=%s", origin, request.path)
         resp = app.make_response(("", 204))
         return _apply_cors_headers(resp)
+
+
+@app.before_request
+def enforce_cookie_csrf():
+    """
+    Protect cookie-authenticated state-changing requests.
+
+    The frontend and API are on different sites, so the production session
+    cookie must use SameSite=None. CORS alone does not prevent a hostile HTML
+    form from submitting a request. Requiring both a trusted Origin and a
+    non-simple custom header makes the browser perform an allowlisted preflight
+    and blocks cross-site form CSRF.
+
+    Server-minted demo bearer tokens are not ambient credentials and therefore
+    do not need this cookie-CSRF check.
+    """
+    if not CLOUD_MODE or request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+
+    session_cookie = (request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    if not session_cookie or auth_header.startswith("Bearer "):
+        return None
+
+    origin = (request.headers.get("Origin") or "").strip().rstrip("/")
+    csrf_header = (request.headers.get("X-CanvasSync-CSRF") or "").strip()
+    if not origin or not _origin_is_allowed(origin) or csrf_header != "1":
+        logger.warning("CSRF: blocked unsafe cookie request path=%s", request.path)
+        return jsonify({
+            "error": "Request blocked by CSRF protection.",
+            "code": "csrf_failed",
+        }), 403
+    return None
+
 
 os.makedirs(STORAGE_ROOT, exist_ok=True)
 # NOTE: Avoid doing network initialization at import time in Cloud Run. If Firebase/ADC
@@ -883,7 +924,7 @@ def canvas_headers(token):
         "Accept": "application/json+canvas-string-ids",
         "User-Agent": os.getenv(
             "CANVASSYNC_USER_AGENT",
-            "CanvasSync/1.0 (Georgia Tech student-built app; canvassync@gatech.edu)",
+            "CanvasSync/1.0 (Georgia Tech student-developed app; pablo3@gatech.edu)",
         ),
     }
 
@@ -1954,12 +1995,19 @@ def disconnect_canvas_api():
 
     try:
         from canvas_token_service import revoke_canvas_tokens
-        revoke_canvas_tokens(user_id)
+        canvas_revocation_confirmed = revoke_canvas_tokens(user_id)
     except Exception as exc:
         logger.exception("Canvas disconnect failed")
         return jsonify({"error": "Failed to disconnect Canvas."}), 500
 
-    return jsonify({"message": "Canvas disconnected. Stored credentials cleared."})
+    return jsonify({
+        "message": (
+            "Canvas disconnected. Stored credentials cleared."
+            if canvas_revocation_confirmed
+            else "Stored Canvas credentials cleared; Canvas did not confirm remote revocation."
+        ),
+        "canvas_revocation_confirmed": canvas_revocation_confirmed,
+    })
 
 
 # =============================================================================
@@ -4054,7 +4102,7 @@ def resolve_course_dates():
     )
     all_course_ids = list(dict.fromkeys(cid for group in course_groups for cid in group))
 
-    has_llm_key = any((os.getenv(name) or "").strip() for name in ("DEEPINFRA_API_KEY", "LLM_API_KEY"))
+    has_llm_key = bool((os.getenv("DEEPINFRA_API_KEY") or "").strip())
     if active_credential_key == DEMO_CREDENTIAL_KEY and (not IS_PRODUCTION or not has_llm_key):
         from demo_memory_store import (
             get_course_assignments as demo_get_course_assignments,

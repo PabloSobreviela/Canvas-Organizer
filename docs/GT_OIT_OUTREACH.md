@@ -1,85 +1,80 @@
-# GT OIT / Digital Learning — Canvas Developer Key Outreach
+# Georgia Tech Digital Learning Outreach
 
-**Status:** Pending response from GT Digital Learning (`canvas@gatech.edu`)
-**Contact:** canvas@gatech.edu (Georgia Tech Digital Learning Team)
-**Prepared:** 2026-06-06
+**Status:** Draft — not yet sent
+**Recipient:** `canvas@gatech.edu`
+**Project contact:** `pablo3@gatech.edu`
+**Prepared:** June 20, 2026
 
----
+## Recommended first inquiry
 
-## Decision required (S-0.1)
-
-Before GT provisions a Canvas Developer Key, we need written confirmation on the integration path:
-
-> CanvasSync's proposed initial integration model is a **GT App student-productivity feature backed by a Canvas OAuth2 REST API client using a Canvas Developer Key**. It is **not** initially designed as a Canvas-embedded LTI tool. The OAuth2 model is appropriate because CanvasSync operates *outside* Canvas and each student authorizes access to their own Canvas data. **LTI 1.3 should only become the primary path if GT requires CanvasSync to launch from within Canvas or appear in Canvas course/module/assignment placements.**
->
-> **Question:** Can CanvasSync proceed as a GT App OAuth2 REST integration (root-account developer key), or must all new Canvas-connected student tools be routed through the LTI 1.3 vetting path (1EdTech certification, ≥3 months before course start)?
-
----
-
-## GT response (record here when received)
-
-| Field | Value |
-| --- | --- |
-| **Date received** | _pending_ |
-| **Respondent / team** | _pending_ |
-| **Approved path** | _OAuth2 REST / LTI 1.3 / other_ |
-| **Conditions or scope limits** | _pending_ |
-| **Timeline / next steps** | _pending_ |
-| **Beta testing available?** | _gatech.beta.instructure.com key?_ |
-
----
-
-## Email draft (copy and send to canvas@gatech.edu)
-
-**Subject:** Canvas Developer Key request — CanvasSync (GT App, OAuth2 REST, read-only)
+**Subject:** Process guidance for a Georgia Tech student-developed external Canvas OAuth app
 
 Hello Digital Learning Team,
 
-I am a Georgia Tech student building **CanvasSync**, a student productivity web app that consolidates Canvas assignment due dates with AI-extracted deadlines from syllabi into one calendar view. The app is intended to surface through the **GT App** experience and runs **outside** Canvas (not an LTI launch).
+I am a Georgia Tech student developing **CanvasSync**, an independent
+student-productivity web application that consolidates a student's own Canvas
+deadlines and authorized course scheduling information. It is not an official,
+sponsored, or endorsed Georgia Tech or Instructure service.
 
-**Integration model:** Canvas OAuth2 authorization-code flow with PKCE. Each student authorizes read-only access to their **own** Canvas data. We do not write to Canvas and do not access other users' data.
+CanvasSync is an external web app, not an LTI launch or Canvas placement. Its
+proposed integration is a confidential OAuth2 authorization-code client using a
+Developer Key issued in Georgia Tech's local Canvas root account. It requests
+read-only access to the authorizing student's own course, assignment, file,
+page, module, syllabus, and announcement data.
 
-**Architecture:**
-- Frontend: React SPA on Vercel (`https://canvas-organizer.vercel.app`; a custom domain is future work)
-- Backend: Flask on Google Cloud Run
-- Database: Supabase (Postgres + RLS, encrypted OAuth tokens)
-- AI: Direct DeepInfra `Qwen/Qwen3-235B-A22B-Instruct-2507` inference for due-date extraction from course text
+Before requesting credential provisioning, I would appreciate guidance on the
+applicable local process:
 
-**Redirect URI (production):** `{YOUR_CLOUD_RUN_URL}/api/auth/canvas/callback`
-**Canvas instance:** `https://gatech.instructure.com`
+1. Does Georgia Tech permit an independent student-developed external OAuth
+   REST application to receive a local Canvas Developer Key?
+2. Is there a streamlined student-development or limited-pilot path?
+3. Does the published 2026 LTI vetting process apply to this non-LTI model?
+4. Is a faculty/staff sponsor, department, data owner, or other institutional
+   owner required?
+5. What security, privacy, accessibility, support, brand, and continuity
+   materials should be supplied?
+6. If the model is permitted, may a separate test-only Developer Key be
+   requested after I provide the exact staging callback and scope list?
+7. May the optional AI data flow be reviewed separately, with AI disabled for
+   GT Canvas-derived data during initial OAuth testing?
 
-**Read-only scopes requested:**
-- `url:GET|/api/v1/users/self`
-- `url:GET|/api/v1/courses`
-- `url:GET|/api/v1/courses/:id`
-- `url:GET|/api/v1/courses/:course_id/assignments`
-- `url:GET|/api/v1/courses/:course_id/files`
-- `url:GET|/api/v1/files/:id`
-- `url:GET|/api/v1/courses/:course_id/modules`
-- `url:GET|/api/v1/courses/:course_id/front_page`
-- `url:GET|/api/v1/courses/:course_id/pages`
-- `url:GET|/api/v1/courses/:course_id/pages/:url_or_id`
-- `url:GET|/api/v1/announcements`
+The current design keeps Canvas tokens encrypted and server-side, requires
+versioned consent, provides export/disconnect/deletion controls, and uses
+read-only scoped access. The optional AI route is direct to DeepInfra using
+`Qwen/Qwen3-235B-A22B-Instruct-2507`; there is no OpenRouter or alternate
+provider fallback.
 
-We request `require_scopes=true`, `allow_includes=true`, and no write scopes on
-the developer key. The assignments include is used only for the current
-student's submission/completion state.
+I understand that this is a Georgia Tech local Canvas-administration decision.
+I am not requesting global Instructure partner certification, a marketplace
+listing, or production approval in this first inquiry.
 
-**Question:** GT's published LTI vetting process (Jan 2026) applies to new LTI integrations. CanvasSync is **not** an LTI tool — it is an external OAuth2 REST client. **Can we proceed with a root-account Canvas Developer Key for this model, or must all new Canvas-connected student tools use the LTI 1.3 path?**
+I can provide the detailed architecture, data inventory, scope matrix, Terms,
+Privacy Policy, security controls, and test plan in the format your team
+prefers.
 
-Attached / linked documentation:
-- `docs/OIT_SUBMISSION.md` — full submission package
-- `docs/OIT_FULL_AUDIT_2026-06-06.md` — security and data-handling audit
-- Privacy policy: `https://canvas-organizer.vercel.app/privacy`
+Thank you,
 
-Thank you for your guidance.
+Georgia Tech student developer
+`pablo3@gatech.edu`
 
----
+## Materials to provide after GT identifies the path
 
-## Attachments checklist
+- `docs/OIT_SUBMISSION.md`
+- `docs/GT_CANVAS_OAUTH_COMPLIANCE_AND_APPROVAL_MAP_2026-06-20.md`
+- `docs/POST_RECONCILIATION_AUDIT_2026-06-20.md`
+- public Privacy Policy: `https://canvas-organizer.vercel.app/privacy`
+- public Terms: `https://canvas-organizer.vercel.app/terms`
+- exact staging callback and requested scopes
 
-- [ ] `docs/OIT_SUBMISSION.md`
-- [ ] `docs/OIT_FULL_AUDIT_2026-06-06.md`
-- [ ] Architecture diagram (from README)
-- [ ] DeepInfra account privacy/logging/retention settings evidence
-- [ ] `docs/verification/verify_deploy_results.json` (after staging deploy)
+## Response log
+
+| Field | Value |
+| --- | --- |
+| Date sent | Pending |
+| Date received | Pending |
+| Respondent | Pending |
+| Approved review path | Pending |
+| Student/sponsor requirements | Pending |
+| Development-key decision | Pending |
+| AI conditions | Pending |
+| Production review conditions | Pending |

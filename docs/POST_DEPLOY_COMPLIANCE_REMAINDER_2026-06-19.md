@@ -1,5 +1,8 @@
 # CanvasSync Post-Deployment Compliance Remainder
 
+> **Historical snapshot.** This file records the June 19, 2026 deployment and is
+> not the current architecture or readiness conclusion. See `docs/README.md`.
+
 **Date:** June 19, 2026
 **Production release reviewed:** Git commit `a88dc2be01d243aa968bab09457b8563cf845d6a`
 **Overall status:** Critical containment fixes deployed; **not yet compliance-ready for general Georgia Tech student use**.

@@ -152,11 +152,11 @@ def delete_all_user_data(user_id: str) -> None:
     from canvas_token_service import revoke_canvas_tokens
 
     revoke_canvas_tokens(user_id)
-    try:
-        from storage import delete_user_storage
-        delete_user_storage(user_id)
-    except Exception as exc:
-        logger.warning("Storage purge on account deletion failed: %s", type(exc).__name__)
+    from storage import delete_user_storage
+    # Do not delete the account row when private object cleanup is incomplete.
+    # Keeping the row allows a safe retry and prevents orphaned storage objects
+    # from becoming impossible to enumerate by user prefix.
+    delete_user_storage(user_id, strict=True)
     db = get_db()
     db.table("rate_limits").delete().eq("user_id", user_id).execute()
     db.table("users").delete().eq("id", user_id).execute()
@@ -499,7 +499,7 @@ def _user_row_to_dict(row: Dict) -> Dict:
     }
 
 
-LEGAL_CONSENT_VERSION = os.getenv("LEGAL_CONSENT_VERSION", "2026-06-19")
+LEGAL_CONSENT_VERSION = os.getenv("LEGAL_CONSENT_VERSION", "2026-06-20")
 
 
 def user_has_legal_consent(user_id: str) -> bool:

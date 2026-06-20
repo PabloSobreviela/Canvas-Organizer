@@ -26,7 +26,7 @@ CANVAS_OAUTH_CLIENT_SECRET = os.getenv("CANVAS_OAUTH_CLIENT_SECRET", "")
 CANVAS_INSTANCE_URL = os.getenv("CANVAS_INSTANCE_URL", "https://gatech.instructure.com").rstrip("/")
 CANVASSYNC_USER_AGENT = os.getenv(
     "CANVASSYNC_USER_AGENT",
-    "CanvasSync/1.0 (Georgia Tech student-built app; canvassync@gatech.edu)",
+    "CanvasSync/1.0 (Georgia Tech student-developed app; pablo3@gatech.edu)",
 )
 
 try:
@@ -100,9 +100,10 @@ def revoke_canvas_tokens(user_id: str) -> bool:
     access_enc = user.get("canvasAccessTokenEncrypted") or user.get("canvasApiTokenEncrypted")
     access_token = decrypt_canvas_token(access_enc)
 
+    provider_revocation_confirmed = not bool(access_token)
     if access_token:
         try:
-            requests.delete(
+            response = requests.delete(
                 f"{api_url}/login/oauth2/token",
                 headers={
                     "Authorization": f"Bearer {access_token}",
@@ -110,6 +111,12 @@ def revoke_canvas_tokens(user_id: str) -> bool:
                 },
                 timeout=10,
             )
+            provider_revocation_confirmed = 200 <= response.status_code < 300
+            if not provider_revocation_confirmed:
+                logger.warning(
+                    "Canvas token revoke was not confirmed: HTTP %s",
+                    response.status_code,
+                )
         except requests.RequestException as exc:
             logger.warning("Canvas token revoke failed: %s", type(exc).__name__)
 
@@ -125,7 +132,7 @@ def revoke_canvas_tokens(user_id: str) -> bool:
         "canvas_credential_key": None,
         "updated_at": now_iso(),
     }).eq("id", user_id).execute()
-    return True
+    return provider_revocation_confirmed
 
 
 def get_valid_canvas_credentials(user_id: str) -> dict | None:

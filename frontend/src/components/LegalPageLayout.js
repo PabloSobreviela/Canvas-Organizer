@@ -12,7 +12,7 @@ export function LegalPageLayout({ title, children }) {
       <main className="flex-1 overflow-auto">
         <article className="max-w-3xl mx-auto px-6 py-10 prose-invert">
           <h1 className="text-2xl font-semibold text-white mb-2">{title}</h1>
-          <p className="text-xs text-zinc-500 mb-8">Last updated: June 19, 2026 · Version 2026-06-19</p>
+          <p className="text-xs text-zinc-500 mb-8">Last updated: June 20, 2026 · Version 2026-06-20</p>
           <div className="space-y-6 text-sm text-zinc-300 leading-relaxed">{children}</div>
         </article>
       </main>

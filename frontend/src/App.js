@@ -887,12 +887,6 @@ function setSavedCourseSyncState(state, baseUrl = "", token = "") {
   localStorage.setItem(scopedKey, JSON.stringify(state));
 }
 
-function clearSavedCourseSyncState(baseUrl = "", token = "") {
-  const scopedKey = buildCourseSyncStateKey(baseUrl, token);
-  localStorage.removeItem(scopedKey);
-  localStorage.removeItem(LEGACY_COURSE_SYNC_STATE_KEY);
-}
-
 function buildCompletedItemsKey(userId = "", baseUrl = "", token = "") {
   const normalizedUserId = String(userId || "").trim();
   const normalizedBaseUrl = normalizeCanvasBaseUrl(baseUrl || localStorage.getItem("canvas_base_url"));
@@ -998,16 +992,6 @@ function setSavedCompletedItems(state, userId = "", baseUrl = "", token = "") {
   }
 }
 
-function clearSavedCompletedItems(userId = "", baseUrl = "", token = "") {
-  const key = buildCompletedItemsKey(userId, baseUrl, token);
-  localStorage.removeItem(key);
-  const tokenHash = hashScopeToken(token);
-  if (tokenHash) {
-    const tokenlessKey = buildCompletedItemsKey(userId, baseUrl, "");
-    if (tokenlessKey !== key) localStorage.removeItem(tokenlessKey);
-  }
-}
-
 function buildCompletionRefreshKey(userId = "", baseUrl = "") {
   const normalizedUserId = String(userId || "").trim();
   const normalizedBaseUrl = normalizeCanvasBaseUrl(baseUrl || localStorage.getItem("canvas_base_url"));
@@ -1071,11 +1055,6 @@ function setSavedCoursesCache(userId = "", baseUrl = "", courses = []) {
   }
 }
 
-function clearSavedCoursesCache(userId = "", baseUrl = "") {
-  const key = buildCoursesCacheKey(userId, baseUrl);
-  localStorage.removeItem(key);
-}
-
 function buildAssignmentsCacheKey(userId = "", baseUrl = "") {
   const normalizedUserId = String(userId || "").trim();
   const normalizedBaseUrl = normalizeCanvasBaseUrl(baseUrl || localStorage.getItem("canvas_base_url"));
@@ -1111,9 +1090,40 @@ function setSavedAssignmentsCache(userId = "", baseUrl = "", itemsByCourse = {})
   }
 }
 
-function clearSavedAssignmentsCache(userId = "", baseUrl = "") {
-  const key = buildAssignmentsCacheKey(userId, baseUrl);
-  localStorage.removeItem(key);
+function clearAllLocalCanvasSyncData() {
+  const exactKeys = new Set([
+    "canvas_base_url",
+    "course_colors",
+    "starred_courses",
+    "sync_enabled_courses",
+    "weekly_filters",
+    "last_sync_at",
+    "subscription_plan",
+    "global_font",
+    "theme",
+    "color_mode",
+  ]);
+  const prefixes = [
+    COURSE_SYNC_STATE_KEY_PREFIX,
+    COMPLETED_ITEMS_KEY_PREFIX,
+    CANVAS_COMPLETION_REFRESH_KEY_PREFIX,
+    COURSES_CACHE_KEY_PREFIX,
+    ASSIGNMENTS_CACHE_KEY_PREFIX,
+  ];
+
+  try {
+    const removals = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      if (exactKeys.has(key) || prefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}:`))) {
+        removals.push(key);
+      }
+    }
+    removals.forEach((key) => localStorage.removeItem(key));
+  } catch {
+    // Browser storage can be unavailable in hardened/private contexts.
+  }
 }
 
 function App() {
@@ -1583,6 +1593,10 @@ function App() {
         setLegalConsentAccepted(consent);
       } else {
         setLegalConsentAccepted(false);
+        clearAllLocalCanvasSyncData();
+        setActiveCourses([]);
+        setItemsByCourse({});
+        setCanvasStatus(null);
       }
 
       // Load cached data when user is authenticated
@@ -1693,14 +1707,7 @@ function App() {
   const handleSignOut = async () => {
     try {
       await logout();
-      // Clear Canvas credentials too
-      clearSavedCourseSyncState(canvasBaseUrl, canvasToken);
-      if (canvasUser?.uid) {
-        clearSavedCoursesCache(canvasUser.uid, canvasBaseUrl);
-        clearSavedAssignmentsCache(canvasUser.uid, canvasBaseUrl);
-        clearSavedCompletedItems(canvasUser.uid, canvasBaseUrl, canvasToken || "");
-      }
-      localStorage.removeItem('canvas_base_url');
+      clearAllLocalCanvasSyncData();
       setActiveCourses([]);
       setItemsByCourse({});
       setCanvasStatus(null);
@@ -2762,13 +2769,7 @@ function App() {
         return;
       }
     }
-    clearSavedCourseSyncState(canvasBaseUrl, canvasToken);
-    localStorage.removeItem("canvas_base_url");
-    if (canvasUser?.uid) {
-      clearSavedCoursesCache(canvasUser.uid, canvasBaseUrl);
-      clearSavedAssignmentsCache(canvasUser.uid, canvasBaseUrl);
-      clearSavedCompletedItems(canvasUser.uid, canvasBaseUrl, canvasToken || "");
-    }
+    clearAllLocalCanvasSyncData();
     setCanvasBaseUrl("");
     setCanvasToken("");
     setActiveCourses([]);
@@ -2857,8 +2858,9 @@ function App() {
       notifyUser({
         tone: "success",
         title: "Your data was deleted",
-        message: "Canvas access was revoked. You are being signed out.",
+        message: "Server data and this device's CanvasSync cache were deleted. You are being signed out.",
       });
+      clearAllLocalCanvasSyncData();
       await new Promise((resolve) => window.setTimeout(resolve, 650));
       await logout();
     } catch (err) {
@@ -4862,7 +4864,7 @@ function App() {
                             </button>
                           </div>
                           <p className="mt-2 text-xs text-zinc-500">
-                            Export downloads everything we store about you as JSON. Delete permanently erases your data and revokes Canvas access.
+                            Export downloads your active CanvasSync account and course records as JSON, excluding secrets and operational logs. Delete removes active app data and stored Canvas credentials.
                           </p>
                         </div>
                       )}
@@ -4913,8 +4915,9 @@ function App() {
                     Delete all CanvasSync data?
                   </h2>
                   <p id="delete-data-description" className="mt-1 text-sm leading-relaxed text-zinc-400">
-                    This permanently deletes stored courses, assignments, preferences, and AI usage metadata. Canvas
-                    access is revoked and this cannot be undone.
+                    This permanently deletes your stored profile, courses, assignments, announcements, extracted
+                    course text, syllabus rules, and preferences. Stored Canvas credentials are removed and remote
+                    revocation is attempted. This cannot be undone.
                   </p>
                 </div>
               </div>

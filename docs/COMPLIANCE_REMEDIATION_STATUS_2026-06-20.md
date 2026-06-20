@@ -1,5 +1,9 @@
 # CanvasSync compliance remediation and remaining work
 
+> **Historical snapshot.** This report predates the follow-up CSRF, database,
+> legal-copy, and documentation remediation performed later on June 20, 2026.
+> See `docs/README.md` and the latest dated audit.
+
 **Audit date:** June 20, 2026
 **Canonical app:** `https://canvas-organizer.vercel.app`
 **Repository branch:** `codex/mobile-open-design-feedback`

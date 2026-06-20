@@ -38,6 +38,8 @@ param(
     [string]$SupabaseStorageBucket = "course-files",
     [string]$ModelName = "Qwen/Qwen3-235B-A22B-Instruct-2507",
     [string]$RateLimitStorageUri = "memory://",
+    [string]$RetentionJobName = "canvassync-retention",
+    [int]$MaxInstances = 1,
 
     [switch]$AllowTemporaryInMemoryRateLimits,
     [switch]$EnableAiResolve,
@@ -105,7 +107,7 @@ $envVarsList = @(
     "MODEL_NAME=$ModelName",
     "LLM_BASE_URL=https://api.deepinfra.com/v1/openai",
     ("ENABLE_AI_RESOLVE=" + $(if ($EnableAiResolve) { "true" } else { "false" })),
-    "LEGAL_CONSENT_VERSION=2026-06-19",
+    "LEGAL_CONSENT_VERSION=2026-06-20",
     "RATELIMIT_STORAGE_URI=$RateLimitStorageUri",
     ("ALLOW_IN_MEMORY_RATE_LIMITS=" + $(if ($AllowTemporaryInMemoryRateLimits) { "true" } else { "false" })),
     "STORE_RAW_CANVAS_JSON=false",
@@ -120,12 +122,47 @@ $envVarsList = @(
 $envVars = $envVarsList -join ","
 
 Write-Step "Deploying backend to Cloud Run (fail-closed config)..."
-$runArgs = "run deploy $ServiceName --source backend --region $Region --platform managed --allow-unauthenticated --set-secrets=$setSecrets --set-env-vars=$envVars"
+$runArgs = "run deploy $ServiceName --source backend --region $Region --platform managed --allow-unauthenticated --max-instances=$MaxInstances --set-secrets=$setSecrets --set-env-vars=$envVars"
 Write-Host "    gcloud $runArgs"
 if (-not $DryRun) {
     cmd /c "gcloud $runArgs"
     if ($LASTEXITCODE -ne 0) { Write-Err "Cloud Run deploy failed" }
+
+    Write-Step "Updating the private retention job to the deployed backend image..."
+    $serviceImage = (
+        cmd /c "gcloud run services describe $ServiceName --region $Region --format=`"value(spec.template.spec.containers[0].image)`""
+    ).Trim()
+    if (-not $serviceImage) {
+        Write-Err "Could not resolve the deployed backend image for the retention job."
+    }
+
+    $retentionSecrets = @(
+        "CANVAS_TOKEN_ENCRYPTION_KEY=canvas-token-encryption-key:latest",
+        "SUPABASE_URL=supabase-url:latest",
+        "SUPABASE_SERVICE_KEY=supabase-service-key:latest"
+    ) -join ","
+    $retentionEnv = @(
+        "APP_ENV=production",
+        "CLOUD_MODE=true",
+        "ENABLE_AI_RESOLVE=false",
+        "SUPABASE_STORAGE_BUCKET=$SupabaseStorageBucket",
+        "STORE_RAW_CANVAS_JSON=false",
+        "COURSE_FILE_TEXT_RETENTION_DAYS=180",
+        "ANNOUNCEMENT_RETENTION_DAYS=180",
+        "ASSIGNMENT_RETENTION_DAYS=180",
+        "COURSE_RETENTION_DAYS=180",
+        "SYLLABUS_RULES_RETENTION_DAYS=180",
+        "INACTIVE_USER_CONTENT_PURGE_DAYS=180"
+    ) -join ","
+    $jobArgs = "run jobs deploy $RetentionJobName --image=$serviceImage --region $Region --command=python --args=retention_service.py --max-retries=1 --task-timeout=900s --set-secrets=$retentionSecrets --set-env-vars=$retentionEnv"
+    Write-Host "    gcloud $jobArgs"
+    cmd /c "gcloud $jobArgs"
+    if ($LASTEXITCODE -ne 0) { Write-Err "Cloud Run retention job update failed" }
 }
 
-Write-Host "`nBackend deployed. Frontend is hosted on Vercel (deploy via Git or 'vercel --prod')." -ForegroundColor Green
+if ($DryRun) {
+    Write-Host "`nDry run complete. No Cloud Run service or job was changed." -ForegroundColor Green
+} else {
+    Write-Host "`nBackend and retention job deployed. Frontend is hosted on Vercel (deploy via Git or 'vercel --prod')." -ForegroundColor Green
+}
 Write-Host "Verify the deployment with docs/PROD_VERIFICATION.md" -ForegroundColor Gray

@@ -1,5 +1,8 @@
 # CanvasSync
 
+CanvasSync is an independent **Georgia Tech student-developed** application. It
+is not an official, sponsored, or endorsed Georgia Tech or Instructure service.
+
 A full-stack web application that unifies Canvas LMS assignments with
 AI-extracted deadlines from syllabi, modules, and course documents into a single
 weekly and calendar view.
@@ -23,7 +26,7 @@ these sources into one timeline.
 
 - **Canvas OAuth2 sign-in** — users connect their own Canvas account via OAuth2;
   access/refresh tokens are encrypted at rest and refreshed automatically.
-- **AI-powered date extraction** — sends relevant course text, after best-effort
+- **AI-powered date extraction (when enabled)** — sends relevant course text, after best-effort
   redaction of obvious identifiers, directly to DeepInfra using
   `Qwen/Qwen3-235B-A22B-Instruct-2507`. Course text is not guaranteed anonymous. Independent course
   groups resolve in parallel (default up to 10 concurrent LLM calls);
@@ -76,7 +79,7 @@ backend exchanges the authorization code for Canvas tokens, encrypts them
 (Fernet) and stores them in Supabase, then issues its own httpOnly session JWT.
 On each request the backend validates the session, refreshes the Canvas token if
 needed, syncs data from the Canvas REST API into Supabase, and (after the user
-has consented) sends relevant course text directly to DeepInfra for date
+  has consented and AI is enabled) sends relevant course text directly to DeepInfra for date
 extraction. No AI gateway or alternate-provider fallback is configured;
 best-effort redaction runs before the request, but free-text course materials
 are not guaranteed anonymous.
@@ -223,7 +226,8 @@ present (see `validate_production_secrets` in `backend/auth.py` and the table in
 `docs/OPS_RUNBOOK.md`): `APP_ENV`, `SESSION_SECRET_KEY`,
 `CANVAS_TOKEN_ENCRYPTION_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`,
 `CANVAS_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI`, `FRONTEND_URL`, and
-`RATELIMIT_STORAGE_URI` (distributed store).
+  `RATELIMIT_STORAGE_URI`. A shared Redis-compatible value is required before
+  claiming multi-instance endpoint limits; `memory://` is process-local only.
 
 ## Security & Privacy
 
@@ -237,8 +241,11 @@ See [SECURITY.md](SECURITY.md) and `docs/OIT_READINESS_AUDIT.md`. Key points:
   configured Qwen model; best-effort PII redaction runs first.
 - **Data minimization & retention** — raw Canvas payloads are not persisted in
   production by default; time-based retention purges stored content.
-- **User data controls** — in-app export and full deletion (revokes Canvas
-  tokens and erases stored rows).
+- **User data controls** — in-app export of active app records and deletion that
+  verifies private-storage cleanup, erases active rows, removes local Canvas
+  credentials, and attempts provider revocation.
 - **SSRF protection** — Canvas hosts validated against an allowlist.
-- **Distributed rate limiting** — per-user sync spacing and hourly caps held in
-  a shared store across autoscaled instances.
+- **Rate limiting** — course-sync spacing/hourly controls are stored in
+  Supabase. Flask endpoint limits are distributed only when
+  `RATELIMIT_STORAGE_URI` points to a shared Redis-compatible store; the current
+  containment configuration may be process-local.

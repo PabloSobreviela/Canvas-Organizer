@@ -6,7 +6,7 @@ Attach JSON output from `verify_deploy.py` to the OIT submission package.
 
 ```bash
 python backend/tools/verify_deploy.py https://YOUR_BACKEND.run.app \
-  --origin https://canvassync.app \
+  --origin https://canvas-organizer.vercel.app \
   --json-out docs/verification/verify_deploy_results.json
 ```
 

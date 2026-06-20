@@ -5,8 +5,10 @@ import pytz
 from datetime import datetime
 
 # Direct DeepInfra inference. No gateway or alternate-provider fallback exists.
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepinfra.com/v1/openai")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-235B-A22B-Instruct-2507")
+APPROVED_DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+APPROVED_DEEPINFRA_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", APPROVED_DEEPINFRA_BASE_URL).rstrip("/")
+MODEL_NAME = os.getenv("MODEL_NAME", APPROVED_DEEPINFRA_MODEL).strip()
 
 # Requests fail rather than silently route to another provider or model.
 
@@ -31,13 +33,11 @@ def _clean_secret(value: str) -> str:
 
 
 def _resolve_llm_api_key() -> str:
-    """Resolve only direct DeepInfra credentials."""
-    for name in ("DEEPINFRA_API_KEY", "LLM_API_KEY"):
-        value = _clean_secret(os.getenv(name))
-        if not value or value in {"your-deepinfra-api-key", "your-api-key"}:
-            continue
-        return value
-    return ""
+    """Resolve only a dedicated direct DeepInfra credential."""
+    value = _clean_secret(os.getenv("DEEPINFRA_API_KEY"))
+    if not value or value in {"your-deepinfra-api-key", "your-api-key"}:
+        return ""
+    return value
 
 
 LLM_API_KEY = _resolve_llm_api_key()
@@ -55,6 +55,16 @@ def _get_primary_client():
         raise RuntimeError(
             "DEEPINFRA_API_KEY is not set. "
             "Configure a direct DeepInfra API key in Secret Manager."
+        )
+    if LLM_BASE_URL != APPROVED_DEEPINFRA_BASE_URL:
+        raise RuntimeError(
+            f"LLM_BASE_URL must be the approved direct DeepInfra endpoint: "
+            f"{APPROVED_DEEPINFRA_BASE_URL}"
+        )
+    if MODEL_NAME != APPROVED_DEEPINFRA_MODEL:
+        raise RuntimeError(
+            f"MODEL_NAME must be the approved DeepInfra model: "
+            f"{APPROVED_DEEPINFRA_MODEL}"
         )
 
     _primary_client = OpenAI(
@@ -96,6 +106,10 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
 
     client = _get_primary_client()
     target_model = model or MODEL_NAME
+    if target_model != APPROVED_DEEPINFRA_MODEL:
+        raise RuntimeError(
+            f"AI model override rejected; only {APPROVED_DEEPINFRA_MODEL} is approved."
+        )
     prompt = sanitize_text_for_llm(prompt)
 
     messages = [

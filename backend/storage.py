@@ -78,7 +78,7 @@ def _storage_bucket():
     return get_supabase_client().storage.from_(BUCKET_NAME)
 
 
-def delete_storage_paths(paths: List[str]) -> int:
+def delete_storage_paths(paths: List[str], *, strict: bool = False) -> int:
     """
     Delete one or more objects from Supabase Storage by full path within the bucket.
     Returns the number of paths successfully removed.
@@ -102,10 +102,14 @@ def delete_storage_paths(paths: List[str]) -> int:
                 deleted += 1
             except Exception:
                 pass
+        if strict and deleted != len(unique):
+            raise RuntimeError(
+                f"Failed to delete {len(unique) - deleted} private storage object(s)."
+            )
         return deleted
 
 
-def delete_user_storage(user_id: str) -> int:
+def delete_user_storage(user_id: str, *, strict: bool = False) -> int:
     """
     Remove all objects under {user_id}/ in the configured bucket.
     Used on full account erasure and retention cleanup.
@@ -116,11 +120,14 @@ def delete_user_storage(user_id: str) -> int:
     prefix = f"{user_id}/"
     to_remove: List[str] = []
 
+    collect_errors: List[str] = []
+
     def _collect(folder: str):
         try:
             entries = _storage_bucket().list(folder)
         except Exception as e:
             logger.warning("Storage list failed for %s: %s", folder, e)
+            collect_errors.append(folder)
             return
         for entry in entries or []:
             name = entry.get("name")
@@ -133,9 +140,11 @@ def delete_user_storage(user_id: str) -> int:
                 _collect(child)
 
     _collect(prefix.rstrip("/"))
+    if collect_errors and strict:
+        raise RuntimeError("Could not enumerate all private storage objects.")
     if not to_remove:
         return 0
-    removed = delete_storage_paths(to_remove)
+    removed = delete_storage_paths(to_remove, strict=strict)
     logger.info("Deleted %d private storage object(s) for one user", removed)
     return removed
 

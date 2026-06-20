@@ -20,6 +20,10 @@ async function apiCall(endpoint, options = {}) {
         'Content-Type': 'application/json',
         ...options.headers
     };
+    const method = String(options.method || 'GET').toUpperCase();
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && !headers['X-CanvasSync-CSRF']) {
+        headers['X-CanvasSync-CSRF'] = '1';
+    }
 
     if (authToken) {
         headers['Authorization'] = `Bearer ${authToken}`;

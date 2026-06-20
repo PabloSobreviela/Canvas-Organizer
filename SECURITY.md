@@ -25,7 +25,10 @@
 ## Rate Limiting
 
 - `RELAX_SYNC_RATE_LIMITS_FOR_TESTING` must **never** be set in production.
-- Production requires `RATELIMIT_STORAGE_URI` (Redis/Upstash), not `memory://`.
+- Multi-instance or general-launch production requires a shared
+  `RATELIMIT_STORAGE_URI` (Redis/Upstash).
+- The documented pre-launch containment deployment may use `memory://` only
+  with `ALLOW_IN_MEMORY_RATE_LIMITS=true` and Cloud Run capped at one instance.
 
 ## Dependencies
 

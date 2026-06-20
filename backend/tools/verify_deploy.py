@@ -9,13 +9,15 @@ backend to confirm the security posture is intact after a deploy. It verifies:
   - authenticated endpoints reject anonymous requests (401)
   - Canvas ingestion endpoints reject anonymous requests (401)
   - CORS preflight echoes an allowed origin and is restrictive otherwise
+  - unsafe cookie requests fail CSRF checks without a trusted origin/header
+  - retired sensitive endpoints remain absent
 
 This does NOT exercise the OAuth round-trip or write any data; follow the manual
 steps in docs/PROD_VERIFICATION.md for the authenticated flow.
 
 Usage:
     python tools/verify_deploy.py https://your-backend.run.app \
-        --origin https://canvassync.app
+        --origin https://canvas-organizer.vercel.app
 Exit code is non-zero if any check fails.
 """
 
@@ -36,6 +38,13 @@ REQUIRED_SECURITY_HEADERS = {
 # Endpoints that must reject anonymous access.
 PROTECTED_GET = ["/api/auth/me", "/api/user/data", "/api/user/export"]
 PROTECTED_POST = ["/api/canvas/courses", "/api/sync_assignments", "/api/user/disconnect-canvas"]
+RETIRED_ENDPOINTS = [
+    "/api/ai/usage-logs",
+    "/api/cloud/cost-audit",
+    "/api/admin/retention/run",
+    "/api/user/canvas-credentials",
+    "/api/canvas/test",
+]
 
 
 class Checker:
@@ -110,6 +119,34 @@ class Checker:
         except requests.RequestException as exc:
             self.check("CORS reachable", False, str(exc))
 
+        # 5. A hostile cross-site form can attach an ambient cookie, but must
+        # fail before the route mutates state.
+        try:
+            r = requests.post(
+                f"{self.base}/api/auth/logout",
+                headers={
+                    "Origin": "https://evil.example.com",
+                    "Cookie": "canvassync_session=invalid-test-cookie",
+                },
+                timeout=15,
+            )
+            payload = r.json() if r.headers.get("Content-Type", "").startswith("application/json") else {}
+            self.check(
+                "CSRF rejects untrusted cookie POST",
+                r.status_code == 403 and payload.get("code") == "csrf_failed",
+                f"got {r.status_code} {payload}",
+            )
+        except requests.RequestException as exc:
+            self.check("CSRF check reachable", False, str(exc))
+
+        # 6. Removed legacy/admin endpoints must stay unavailable.
+        for path in RETIRED_ENDPOINTS:
+            try:
+                r = requests.get(f"{self.base}{path}", timeout=15)
+                self.check(f"retired {path} absent", r.status_code == 404, f"got {r.status_code}")
+            except requests.RequestException as exc:
+                self.check(f"retired {path} reachable", False, str(exc))
+
         return self.summary()
 
     def summary(self) -> int:
@@ -134,7 +171,11 @@ class Checker:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only backend verification")
     parser.add_argument("base_url", help="Backend base URL, e.g. https://x.run.app")
-    parser.add_argument("--origin", default="https://canvassync.app", help="An allowed frontend origin")
+    parser.add_argument(
+        "--origin",
+        default="https://canvas-organizer.vercel.app",
+        help="An allowed frontend origin",
+    )
     parser.add_argument("--json-out", default="", help="Write JSON results to this path")
     args = parser.parse_args()
     checker = Checker(args.base_url, args.origin)

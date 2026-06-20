@@ -7,7 +7,7 @@ a short manual authenticated flow.
 
 ```bash
 cd backend
-python tools/verify_deploy.py https://<backend-host> --origin https://canvassync.app
+  python tools/verify_deploy.py https://<backend-host> --origin https://canvas-organizer.vercel.app
 ```
 
 This confirms (exit code 0 = all passed):
@@ -48,6 +48,8 @@ This confirms (exit code 0 = all passed):
 7. **Delete:** Settings → *Delete all my data*; confirm you are signed out and
    that re-login shows no prior data. Confirm Supabase Storage has no objects
    under `{user_id}/` (Track C erasure).
+8. **CSRF:** with a valid session, send an unsafe request from an untrusted
+   Origin without `X-CanvasSync-CSRF`; confirm HTTP 403 and `csrf_failed`.
 
 ## 4. Data-handling spot checks (DB + Storage)
 
@@ -58,6 +60,6 @@ This confirms (exit code 0 = all passed):
 
 ## 5. Retention
 
-- Trigger retention once (`python retention_service.py` against staging, or POST
-  `/api/admin/retention/run` with the cron secret) and confirm it reports delete
-  counts without error.
+- Trigger retention once using the private Cloud Run Job (or
+  `python retention_service.py` against staging) and confirm it reports delete
+  counts without error. There is no public retention endpoint.

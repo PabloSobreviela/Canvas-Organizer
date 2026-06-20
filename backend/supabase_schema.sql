@@ -151,6 +151,22 @@ ALTER TABLE announcements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE syllabus_rules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rate_limits ENABLE ROW LEVEL SECURITY;
 
+-- The Cloud Run backend is the only database client. RLS and object grants are
+-- separate protections, so browser-facing roles receive neither table access
+-- nor an allowing row policy.
+REVOKE ALL ON TABLE users, courses, assignments, course_file_texts, announcements, syllabus_rules, rate_limits
+  FROM anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON TABLE users, courses, assignments, course_file_texts, announcements, syllabus_rules, rate_limits
+  TO service_role;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  REVOKE USAGE, SELECT ON SEQUENCES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  REVOKE EXECUTE ON FUNCTIONS FROM anon, authenticated, PUBLIC;
+
 -- RLS policies: backend uses service_role key which bypasses RLS.
 -- Deny direct anon/authenticated access; see migrations/002_fix_rls.sql for upgrades.
 CREATE POLICY "deny_direct_users" ON users FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);

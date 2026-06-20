@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { API_BASE } from "../config";
 import { apiFetchOptions } from "../auth";
 
-const CONSENT_VERSION = "2026-06-19";
+const CONSENT_VERSION = "2026-06-20";
 
 export function ConsentModal({ onAccepted }) {
   const [agreed, setAgreed] = useState(false);
@@ -66,13 +66,14 @@ export function ConsentModal({ onAccepted }) {
             <section className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
               <h3 className="text-sm font-medium text-zinc-100">AI processing</h3>
               <p className="mt-1 text-zinc-400">
-                For missing dates, we send the minimum course text needed for extraction, such as syllabus excerpts,
-                assignment titles, and short announcement snippets. Requests go directly to{" "}
+                When AI is enabled, date resolution sends a minimized selection of syllabus or course-text excerpts,
+                assignment titles and context, and short announcement snippets directly to{" "}
                 <strong className="text-zinc-100">DeepInfra</strong> using the{" "}
                 <strong className="text-zinc-100">Qwen3-235B-A22B-Instruct-2507</strong> model.
-                No AI gateway or alternate-provider fallback is used. DeepInfra says ordinary inference content is
-                processed in memory and not used for training, but reserves the right to log a small portion of
-                requests for debugging or security.
+                No AI gateway or alternate-provider fallback is used. CanvasSync uses DeepInfra's ordinary
+                synchronous inference endpoint, which DeepInfra describes as zero-data-retention by default:
+                content is processed in memory, not stored to disk after inference, and not used for training.
+                DeepInfra reserves the right to log a small portion of requests for debugging or security.
               </p>
             </section>
 
@@ -89,9 +90,12 @@ export function ConsentModal({ onAccepted }) {
             <section className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
               <h3 className="text-sm font-medium text-zinc-100">Your controls</h3>
               <p className="mt-1 text-zinc-400">
-                You can export or permanently delete stored data from Settings, or by contacting us. Logging out
-                revokes the stored Canvas OAuth tokens. Synced course content is subject to a 180-day retention
-                window.
+                You can export active app records or request deletion from Settings or by contacting us. Deletion
+                removes active database and private-storage records, removes stored Canvas credentials, and attempts
+                remote revocation. The app also caches course and preference data in browser storage; successful
+                deletion clears CanvasSync caches on the device performing the request. Provider security, backup,
+                and operational logs may follow separate retention periods. Synced course content is subject to a
+                180-day retention window.
               </p>
             </section>
           </div>
@@ -108,8 +112,8 @@ export function ConsentModal({ onAccepted }) {
             />
             <div>
               <label htmlFor="legal-consent-checkbox" className="cursor-pointer">
-                I agree to the Terms of Service and Privacy Policy, and I understand the AI processing described
-                above.
+                I confirm that I am at least 18 years old, agree to the Terms of Service and Privacy Policy, and
+                understand the AI processing described above.
               </label>
               <p className="mt-1 text-xs text-zinc-500">
                 Review the{" "}

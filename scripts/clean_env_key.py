@@ -1,47 +1,35 @@
-"""Strip BOM / zero-width chars from LLM_API_KEY in backend/.env (no output of secret)."""
-from __future__ import annotations
+"""Strip BOM / zero-width characters from DEEPINFRA_API_KEY in backend/.env.
 
-import re
-import sys
+This helper never prints the secret value.
+"""
+
 from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-ENV_PATH = REPO_ROOT / "backend" / ".env"
+import re
 
 
-def clean_value(raw: str) -> str:
-    return raw.strip().strip("\ufeff").strip("\u200b").strip('"').strip("'")
+ENV_PATH = Path(__file__).resolve().parents[1] / "backend" / ".env"
 
 
-def main() -> int:
-    if not ENV_PATH.is_file():
-        print(f"Missing {ENV_PATH}", file=sys.stderr)
-        return 1
+def main() -> None:
+    if not ENV_PATH.exists():
+        raise SystemExit("backend/.env not found")
 
     text = ENV_PATH.read_text(encoding="utf-8-sig")
-    lines: list[str] = []
     changed = False
-
+    lines = []
     for line in text.splitlines():
-        match = re.match(r"^(\s*LLM_API_KEY\s*=\s*)(.+)\s*$", line)
+        match = re.match(r"^(\s*DEEPINFRA_API_KEY\s*=\s*)(.+)\s*$", line)
         if match:
-            prefix, raw = match.group(1), match.group(2)
-            cleaned = clean_value(raw)
-            changed = changed or cleaned != raw.strip()
-            lines.append(prefix + cleaned)
-        else:
-            lines.append(line)
+            cleaned = match.group(2).strip().strip("\ufeff").strip("\u200b")
+            line = match.group(1) + cleaned
+            changed = True
+        lines.append(line)
 
-    if changed:
-        ENV_PATH.write_text(
-            "\n".join(lines) + ("\n" if text.endswith("\n") else ""),
-            encoding="utf-8",
-        )
-        print("env cleaned: True")
-    else:
-        print("env cleaned: False")
-    return 0
+    if not changed:
+        raise SystemExit("DEEPINFRA_API_KEY not found")
+    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("Cleaned DEEPINFRA_API_KEY without displaying it.")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

@@ -1,5 +1,9 @@
 # CanvasSync Production Compliance Audit
 
+> **Historical snapshot.** This file records conditions observed on June 19,
+> 2026, including retired OpenRouter and exposed-endpoint behavior. It is not the
+> current architecture or readiness conclusion. See `docs/README.md`.
+
 **Audit date:** June 19, 2026
 **Scope:** Production behavior, the exact deployed Vercel frontend and Cloud Run backend, the current repository worktree, Georgia Tech requirements relevant to a student-built application, the Instructure Canvas API Policy, and the application's Terms, Privacy Policy, consent text, and related documentation.
 **Assessment:** **Red — not ready to represent as compliant or ready for a general Georgia Tech student launch.**

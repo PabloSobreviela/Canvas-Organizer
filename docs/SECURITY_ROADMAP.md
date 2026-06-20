@@ -1,74 +1,67 @@
 # CanvasSync Security Roadmap
 
-Phased remediation checklist with owners, environment variables, and acceptance criteria.
+**Updated:** June 20, 2026
 
----
+## Completed in the current review branch
 
-## Phase 1 — Blockers (complete in codebase)
+- Cookie sessions with server-side invalidation.
+- Signed OAuth state and PKCE parameters.
+- Encrypted Canvas tokens with refresh and checked revocation responses.
+- Production PAT/body-token paths disabled.
+- Origin plus custom-header CSRF protection.
+- Strict CORS and frontend/backend security headers.
+- Canvas/file SSRF and pagination-host checks.
+- Raw-payload minimization.
+- Supabase object-grant restrictions plus deny-direct RLS.
+- Daily private retention job and retention indexes.
+- Export, disconnect, storage-aware deletion, and current-device cache purge.
+- Direct DeepInfra-only routing pinned to
+  `Qwen/Qwen3-235B-A22B-Instruct-2507`.
+- Obsolete public/debug endpoints removed.
+- Legal consent version `2026-06-20`.
 
-| # | Task | Files | Env / config |
-|---|------|-------|----------------|
-| 1 | Disable demo JWT in production | `backend/app.py` | `ENABLE_DEMO_SESSION=false` |
-| 2 | Enforce secrets at boot | `backend/auth.py`, `backend/db_supabase.py` | `SESSION_SECRET_KEY`, `CANVAS_TOKEN_ENCRYPTION_KEY`, `SUPABASE_*` |
-| 3 | Fix Supabase RLS | `backend/supabase_schema.sql`, `backend/migrations/002_fix_rls.sql` | Run migration in Supabase SQL editor |
-| 4 | Canvas token refresh | `backend/canvas_token_service.py`, `app.py` | — |
-| 5 | Cookie sessions | `backend/auth.py`, `frontend/src/auth.js` | `FRONTEND_URL`, HTTPS |
-| 6 | Remove PAT in cloud | `backend/app.py` | No `REACT_APP_ENABLE_MANUAL_TOKEN_CONNECT` in prod |
+## Before a GT development-key test
 
-**Acceptance:** OAuth login → sync works without manual token; no token in browser URL.
+- Apply and verify migration `010_compliance_state.sql`.
+- Deploy and verify Vercel, Cloud Run service, and retention job from the same
+  reviewed source.
+- Confirm public Terms/Privacy and consent text match the deployed controls.
+- Receive GT's process decision and exact staging/key requirements.
+- Provision a separate staging callback if requested.
 
----
+## Before a real-user pilot
 
-## Phase 2 — Abuse resistance (complete in codebase)
+- Complete GT Canvas OAuth, scope, refresh, revoke, error, and PKCE tests.
+- Obtain GT's written decision on direct DeepInfra processing.
+- Complete any accessibility, sponsor, data-owner, security, or brand review GT
+  requires.
+- Resolve whether process-local endpoint limits are acceptable for the pilot.
+- Record an incident/escalation contact supplied by GT.
 
-| # | Task | Files | Env |
-|---|------|-------|-----|
-| 7 | Redis rate limits | `backend/app.py` | `RATELIMIT_STORAGE_URI=redis://...` |
-| 8 | Signed OAuth state + PKCE | `backend/auth.py` | — |
-| 9 | Canvas revoke on logout | `backend/auth.py`, `canvas_token_service.py` | — |
-| 10 | AI dashboard locked down | `backend/app.py` | `ENABLE_AI_USAGE_LOGS_DASHBOARD=false`, `AI_USAGE_LOGS_ALLOWED_EMAILS` |
-| 11 | SPA security headers | `frontend/vercel.json` | — |
-| 12 | Pagination URL validation | `backend/app.py` | `CANVAS_PAGINATION_MAX_PAGES` |
+## Before multi-instance or broad launch
 
----
+- Configure a shared Redis-compatible `RATELIMIT_STORAGE_URI`.
+- Increase Cloud Run max instances only after distributed endpoint limits pass.
+- Replace Create React App with a maintained build stack and clear relevant
+  dependency audit findings.
+- Complete broader accessibility and browser testing.
+- Add outbound IP pinning or an equivalent DNS-rebinding control.
+- Reconfirm scopes, provider/model, data categories, retention, and support
+  expectations with GT.
 
-## Phase 3 — Governance (complete in codebase)
+## Canonical production values
 
-| # | Task | Files |
-|---|------|-------|
-| 13 | Data retention cleanup | `backend/app.py` `POST /api/user/delete-data` |
-| 14 | Sync throttle helper | `backend/sync_throttle.py` |
-| 15 | Delete legacy code | Removed `LEGACY_CODE_*`, `LastWorkingApp.js`, etc. |
-| 16 | CI security scripts | `scripts/security_check.py`, `.github/workflows/security.yml` |
-| 17 | Institutional compliance doc | `docs/INSTITUTIONAL_COMPLIANCE.md` |
-
----
-
-## Production environment checklist
-
-```bash
-SESSION_SECRET_KEY=<32+ random bytes>
-CANVAS_TOKEN_ENCRYPTION_KEY=<Fernet key>
-SUPABASE_URL=...
-SUPABASE_SERVICE_KEY=...
-CANVAS_OAUTH_CLIENT_ID=...
-CANVAS_OAUTH_CLIENT_SECRET=...
-CANVAS_OAUTH_REDIRECT_URI=https://<api>/api/auth/canvas/callback
-FRONTEND_URL=https://canvassync.app
-ENABLE_DEMO_SESSION=false
-ENABLE_AI_USAGE_LOGS_DASHBOARD=false
-AI_USAGE_LOGS_ALLOWED_EMAILS=admin@example.com
-REACT_APP_API_URL=https://<api>
-# Optional:
-RATELIMIT_STORAGE_URI=redis://...
+```text
+FRONTEND_URL=https://canvas-organizer.vercel.app
+CANVAS_INSTANCE_URL=https://gatech.instructure.com
+LLM_BASE_URL=https://api.deepinfra.com/v1/openai
+MODEL_NAME=Qwen/Qwen3-235B-A22B-Instruct-2507
+LEGAL_CONSENT_VERSION=2026-06-20
+STORE_RAW_CANVAS_JSON=false
 COURSE_FILE_TEXT_RETENTION_DAYS=180
+ANNOUNCEMENT_RETENTION_DAYS=180
+ASSIGNMENT_RETENTION_DAYS=180
+COURSE_RETENTION_DAYS=180
+SYLLABUS_RULES_RETENTION_DAYS=180
+INACTIVE_USER_CONTENT_PURGE_DAYS=180
 ```
-
----
-
-## Out of scope (deferred)
-
-- Full `App.js` decomposition
-- Grouped-course calendar dedupe
-- CRA → Vite migration
-- DNS-rebind pinning for Canvas SSRF
