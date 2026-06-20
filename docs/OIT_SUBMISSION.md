@@ -45,7 +45,7 @@ requested, data handling, security controls, and operational practices.
 React SPA (Vercel)  --session JWT-->  Flask API (Google Cloud Run)
        |                                   |
   Sign in with Canvas (OAuth2)             |-- Supabase (Postgres + RLS, Storage)
-       |                                   |-- OpenRouter (AI date extraction, ZDR)
+       |                                   |-- DeepInfra (direct AI date extraction)
        +------------------ Canvas LMS REST API <--+
 ```
 
@@ -53,8 +53,8 @@ React SPA (Vercel)  --session JWT-->  Flask API (Google Cloud Run)
 - **Backend:** Python/Flask on Google Cloud Run (autoscaled, containerized).
 - **Database:** Supabase (managed Postgres) with Row-Level Security; the backend
   uses a service role and is the only path to data.
-- **AI:** OpenRouter API gateway with input/output logging disabled and
-  zero-data-retention routing requested.
+- **AI:** Direct DeepInfra inference using
+  `Qwen/Qwen3-235B-A22B-Instruct-2507`; no AI gateway or alternate provider.
 - See `README.md` and `docs/OIT_READINESS_AUDIT.md` for detail.
 
 ## 3. Authentication & token handling
@@ -78,11 +78,11 @@ build a student's deadline view:
 | Capability | Canvas API (read-only) |
 | --- | --- |
 | List the user's courses | `GET /api/v1/courses` |
-| Course assignments + submission state | `GET /api/v1/courses/:id/assignments`, `/students/submissions` |
+| Course details and syllabus body | `GET /api/v1/courses/:id` |
+| Course assignments + current-user submission state | `GET /api/v1/courses/:course_id/assignments` with `include[]=submission` |
 | Announcements | `GET /api/v1/announcements` |
-| Files (syllabus/schedule documents) | `GET /api/v1/courses/:id/files`, file download |
-| Modules & pages | `GET /api/v1/courses/:id/modules`, `/pages` |
-| Syllabus body | `GET /api/v1/courses/:id` (syllabus_body) |
+| Files (syllabus/schedule documents) | `GET /api/v1/courses/:course_id/files`, `GET /api/v1/files/:id`, file download |
+| Modules & pages | `GET /api/v1/courses/:course_id/modules`, `/front_page`, `/pages`, `/pages/:url_or_id` |
 
 No write scopes are requested. If GT prefers a narrower enforced scope set on the
 Developer Key, the app functions with any subset and degrades gracefully.
@@ -93,14 +93,20 @@ OAuth `scope` parameter sent at authorize time (configurable via
 ```
 url:GET|/api/v1/users/self
 url:GET|/api/v1/courses
+url:GET|/api/v1/courses/:id
 url:GET|/api/v1/courses/:course_id/assignments
 url:GET|/api/v1/courses/:course_id/files
+url:GET|/api/v1/files/:id
 url:GET|/api/v1/courses/:course_id/modules
+url:GET|/api/v1/courses/:course_id/front_page
 url:GET|/api/v1/courses/:course_id/pages
+url:GET|/api/v1/courses/:course_id/pages/:url_or_id
 url:GET|/api/v1/announcements
 ```
 
-Request `require_scopes=true` and `allow_includes=false` on the developer key.
+Request `require_scopes=true` and `allow_includes=true` on the developer key.
+The assignment `submission` include is used only to determine the signed-in
+student's completion state; grades and submitted work are not stored.
 
 ## 5. Data handling
 
@@ -118,9 +124,10 @@ Request `require_scopes=true` and `allow_includes=false` on the developer key.
   user id), never from the rotating token.
 
 ### 5.3 Retention
-- Time-based retention purges extracted file text and announcements (default 180
-  days) and AI usage logs (default 365 days) via a scheduled job
-  (`retention_service.py`). Windows are configurable.
+- Time-based retention purges assignments, courses, extracted file text,
+  announcements, and syllabus rules after 180 days via a scheduled job
+  (`retention_service.py`). CanvasSync does not maintain an AI prompt,
+  completion, or token-usage history.
 
 ### 5.4 User rights
 - **Export:** In-app JSON export of all stored data (excludes secrets).
@@ -137,20 +144,24 @@ Request `require_scopes=true` and `allow_includes=false` on the developer key.
 ## 6. AI processing & subprocessors
 
 - **Purpose:** Extract due dates from course text the Canvas API does not surface.
-- **Provider:** OpenRouter gateway routing to **DeepInfra** with per-request ZDR
-  required, provider data collection denied, and provider fallback disabled.
-  Data routing is bound to a disclosed allowlist (`DISCLOSED_AI_PROVIDERS`);
-  the app refuses to send data to an undisclosed provider.
+- **Provider:** Direct **DeepInfra** inference using
+  `Qwen/Qwen3-235B-A22B-Instruct-2507`. No AI gateway, alternate provider, or
+  automatic model fallback is configured.
 - **PII reduction:** Best-effort redaction (emails, phone numbers, ID/SSN-like
   patterns, tokens) runs before sending; we disclose to users that anonymity is
   not guaranteed for free-text documents.
-- **Provider data retention:** OpenRouter input/output logging is disabled on our
-  account. Each request requires a DeepInfra ZDR endpoint; if the route cannot
-  satisfy the ZDR/data-policy constraints, the AI request should fail rather
-  than silently route to another provider.
+- **Output labeling:** Every discovered item or modified date is labeled
+  "AI-generated from materials," "AI-assisted date," or "Review AI date" at the
+  point of use.
+- **Provider controls:** DeepInfra's current documentation says ordinary
+  inference inputs and outputs are processed in memory, are not stored to disk,
+  and are not used for training. It also reserves the right to log a small
+  portion of requests for debugging or security. These terms and any
+  account-level controls must be accepted by Georgia Tech before production AI
+  is enabled. CanvasSync itself does not persist prompts or completions.
 
 **Subprocessors:** Supabase (database/storage), Google Cloud (compute), Vercel
-(frontend hosting), OpenRouter (API gateway), DeepInfra (ZDR LLM inference).
+(frontend hosting), and DeepInfra (direct LLM inference).
 
 ## 7. Security controls
 

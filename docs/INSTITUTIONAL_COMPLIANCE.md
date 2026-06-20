@@ -32,7 +32,7 @@ Users may call `POST /api/user/delete-data` to revoke Canvas tokens and erase al
 ## Security controls (production)
 
 - `ENABLE_DEMO_SESSION=false`
-- `ENABLE_AI_USAGE_LOGS_DASHBOARD=false` unless explicitly allowlisted
+- No AI usage-log or cloud-cost endpoint is present in the production application
 - `REACT_APP_ENABLE_MANUAL_TOKEN_CONNECT` unset (no manual PAT)
 - Strong `SESSION_SECRET_KEY` (≥32 chars) and `CANVAS_TOKEN_ENCRYPTION_KEY`
 - Supabase RLS denies direct client access; backend uses service role only
@@ -42,10 +42,10 @@ Users may call `POST /api/user/delete-data` to revoke Canvas tokens and erase al
 
 - [x] Publish privacy policy URL linked from app footer (`/privacy`)
 - [x] Publish terms of service (`/terms`)
-- [x] Describe Canvas OAuth, data categories, OpenRouter AI, retention, and deletion
+- [x] Describe Canvas OAuth, data categories, direct DeepInfra AI, retention, and deletion
 - [ ] Contact email for data requests (set `REACT_APP_LEGAL_CONTACT_EMAIL` in prod)
 - [ ] GT-specific: confirm alignment with student code of conduct and acceptable use
-- [x] OpenRouter I/O logging off; ZDR enforced in code; content anonymity limitation disclosed
+- [ ] DeepInfra account-level logging, retention, training, and data-use settings documented for OIT
 
 ## Acceptance tests (manual)
 

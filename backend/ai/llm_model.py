@@ -3,19 +3,12 @@ import json
 import re
 import pytz
 from datetime import datetime
-from ai.usage_telemetry import build_usage_payload, emit_usage_log, mark_usage_error
 
-# Primary provider: OpenRouter, pinned to a single ZDR-compliant upstream provider.
-# Compliance decision (GT OIT / BPM 3.4.4): student "Protected" data may only be
-# routed to a named Zero-Data-Retention provider that does not retain or train on
-# it. We therefore pin DeepInfra-only + ZDR + data_collection=deny and disable
-# automatic provider/model fallback. See docs/OIT_READINESS_AUDIT.md (R6).
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen/qwen3-235b-a22b-2507")
+# Direct DeepInfra inference. No gateway or alternate-provider fallback exists.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepinfra.com/v1/openai")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-235B-A22B-Instruct-2507")
 
-# NOTE: There is intentionally NO alternate-provider / fallback-model client.
-# The compliance decision requires a single, disclosed DeepInfra-only ZDR route;
-# a request must never be silently re-routed to another provider or model.
+# Requests fail rather than silently route to another provider or model.
 
 
 def _env_bool(name: str, default: str) -> bool:
@@ -23,30 +16,11 @@ def _env_bool(name: str, default: str) -> bool:
 
 
 AI_DEBUG = _env_bool("AI_DEBUG", "")
-OPENROUTER_ENFORCE_ZDR = _env_bool("OPENROUTER_ENFORCE_ZDR", "true")
-OPENROUTER_ALLOW_FALLBACK = _env_bool("OPENROUTER_ALLOW_FALLBACK", "false")
-OPENROUTER_DENY_DATA_COLLECTION = _env_bool("OPENROUTER_DENY_DATA_COLLECTION", "true")
-
-# Comma-separated OpenRouter provider slugs the request may route to (e.g. "deepinfra").
-# Empty string = no pin (NOT recommended in production). Default pins DeepInfra only.
-OPENROUTER_PROVIDER_ONLY = [
-    p.strip() for p in os.getenv("OPENROUTER_PROVIDER_ONLY", "deepinfra").split(",") if p.strip()
-]
 
 # Deterministic structured-extraction settings (no max_tokens cap — use provider default).
 AI_TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.1"))
 AI_TOP_P = float(os.getenv("AI_TOP_P", "0.9"))
 
-
-def _disclosed_providers() -> set:
-    """
-    Providers the user consent/disclosure text declares we may send data to.
-    Routing is bound to this allowlist so we can never silently send course
-    content to an undisclosed provider. See docs/OIT_READINESS_AUDIT.md (R6).
-    Default matches the production route: OpenRouter gateway plus DeepInfra inference.
-    """
-    raw = os.getenv("DISCLOSED_AI_PROVIDERS", "openrouter,deepinfra")
-    return {p.strip().lower() for p in raw.split(",") if p.strip()}
 
 _primary_client = None
 
@@ -57,10 +31,10 @@ def _clean_secret(value: str) -> str:
 
 
 def _resolve_llm_api_key() -> str:
-    """Accept common env var names; ignore template placeholders."""
-    for name in ("LLM_API_KEY", "OPENROUTER_API_KEY", "LAMBDA_API_KEY"):
+    """Resolve only direct DeepInfra credentials."""
+    for name in ("DEEPINFRA_API_KEY", "LLM_API_KEY"):
         value = _clean_secret(os.getenv(name))
-        if not value or value == "your-openrouter-api-key":
+        if not value or value in {"your-deepinfra-api-key", "your-api-key"}:
             continue
         return value
     return ""
@@ -70,7 +44,7 @@ LLM_API_KEY = _resolve_llm_api_key()
 
 
 def _get_primary_client():
-    """Lazily create an OpenAI client for OpenRouter."""
+    """Lazily create an OpenAI-compatible client for direct DeepInfra inference."""
     global _primary_client
     if _primary_client is not None:
         return _primary_client
@@ -79,39 +53,16 @@ def _get_primary_client():
 
     if not LLM_API_KEY:
         raise RuntimeError(
-            "LLM_API_KEY is not set. "
-            "Configure your OpenRouter API key in .env or Cloud Run environment variables."
+            "DEEPINFRA_API_KEY is not set. "
+            "Configure a direct DeepInfra API key in Secret Manager."
         )
 
     _primary_client = OpenAI(
         api_key=LLM_API_KEY,
         base_url=LLM_BASE_URL,
-        default_headers={
-            "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "https://canvassync.app"),
-            "X-Title": os.getenv("OPENROUTER_APP_TITLE", "CanvasSync"),
-        },
     )
-    print(f"[OK] Primary LLM client initialized: {LLM_BASE_URL} (Model: {MODEL_NAME})")
+    print(f"[OK] Direct DeepInfra client initialized (Model: {MODEL_NAME})")
     return _primary_client
-
-
-def _build_provider_config() -> dict:
-    """
-    Build the OpenRouter `provider` routing object from the compliance settings.
-
-    Pins routing to the disclosed ZDR provider(s), requires Zero-Data-Retention,
-    denies provider-side data collection, and disables automatic fallback so a
-    request can never be silently re-routed to an undisclosed/non-ZDR provider.
-    """
-    provider: dict = {}
-    if OPENROUTER_PROVIDER_ONLY:
-        provider["only"] = OPENROUTER_PROVIDER_ONLY
-    if OPENROUTER_ENFORCE_ZDR:
-        provider["zdr"] = True
-    if OPENROUTER_DENY_DATA_COLLECTION:
-        provider["data_collection"] = "deny"
-    provider["allow_fallbacks"] = OPENROUTER_ALLOW_FALLBACK
-    return provider
 
 
 def _response_to_text(response, target_model: str) -> str:
@@ -134,40 +85,18 @@ def _is_parseable_json(text: str) -> bool:
 def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operation: str = "unknown",
               expect_json: bool = True):
     """
-    Send a chat-completion request via OpenRouter, pinned to the disclosed ZDR
-    provider. Routing never falls back to another provider/model automatically.
+    Send a chat-completion request directly to DeepInfra.
 
     If the response is not valid JSON, retry exactly once against the SAME
-    model/provider with stricter formatting instructions (per the extraction
-    contract); we never switch model or provider to recover.
+    model with stricter formatting instructions.
     """
     from openai import APIError, APIConnectionError, APITimeoutError, RateLimitError
     from ai.prompt_sanitizer import sanitize_text_for_llm
     import time
 
-    disclosed = _disclosed_providers()
-    if "openrouter" not in disclosed:
-        raise RuntimeError(
-            "Primary AI provider 'openrouter' is not in DISCLOSED_AI_PROVIDERS; "
-            "refusing to send data to an undisclosed provider."
-        )
-    # Bind the pinned upstream provider to the consent disclosure: we must never
-    # route Protected data to a provider users were not told about.
-    for slug in OPENROUTER_PROVIDER_ONLY:
-        if slug.lower() not in disclosed:
-            raise RuntimeError(
-                f"Pinned AI provider '{slug}' is not in DISCLOSED_AI_PROVIDERS; "
-                "refusing to route data to an undisclosed provider."
-            )
-
     client = _get_primary_client()
     target_model = model or MODEL_NAME
     prompt = sanitize_text_for_llm(prompt)
-
-    extra_body = {"reasoning": {"effort": "none"}}
-    provider_cfg = _build_provider_config()
-    if provider_cfg:
-        extra_body["provider"] = provider_cfg
 
     messages = [
         {"role": "system", "content": "You are an expert academic schedule extraction system. Respond with valid JSON only."},
@@ -179,12 +108,7 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
         temperature=AI_TEMPERATURE,
         top_p=AI_TOP_P,
         response_format={"type": "json_object"},
-        extra_body=extra_body,
     )
-
-    telemetry = dict(telemetry_context or {})
-    telemetry.setdefault("llm_provider", "openrouter")
-    telemetry.setdefault("ai_route", ",".join(OPENROUTER_PROVIDER_ONLY) or "any")
 
     def _create(call_params):
         """One logical call with bounded retry on rate limits; no provider switch."""
@@ -200,8 +124,6 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
                 print(f"[WARN] LLM rate limited (attempt {attempt}/3); retrying in {backoff:.0f}s")
                 time.sleep(backoff)
             except (APIError, APIConnectionError, APITimeoutError) as e:
-                # Do NOT fall back to another provider/model: that would route
-                # Protected data outside the disclosed ZDR path. Surface the error.
                 raise e
         if last_error is not None:
             raise last_error
@@ -225,15 +147,7 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
         response = _create(strict_params)
         raw_text = _response_to_text(response, target_model)
 
-    telemetry["json_retry"] = json_retry
-    usage_payload = build_usage_payload(
-        response,
-        model_name=response.model or target_model,
-        operation=operation,
-        telemetry_context=telemetry,
-        prompt_chars=len(prompt),
-    )
-    return raw_text, usage_payload
+    return raw_text
 
 
 def _extract_first_json(value: str):
@@ -530,7 +444,7 @@ OUTPUT: minified JSON only (no spaces, no newlines, no prose), schema:
 Every Canvas cid MUST appear exactly once. Every "due" MUST be exactly YYYY-MM-DD."""
 
     # --- STEP 4: CALL LLM ---
-    raw_text, usage_payload = _call_llm(
+    raw_text = _call_llm(
         full_prompt,
         operation="resolve_assignment_dates",
         telemetry_context=telemetry_context,
@@ -540,8 +454,7 @@ Every Canvas cid MUST appear exactly once. Every "due" MUST be exactly YYYY-MM-D
         parsed = _extract_first_json(raw_text)
 
         if isinstance(parsed, list):
-            emit_usage_log(usage_payload)
-            return {"cc": "UNK", "a": parsed, "_usage": usage_payload}
+            return {"cc": "UNK", "a": parsed}
 
         assign_list = parsed.get("a") or parsed.get("assignments") or []
 
@@ -593,12 +506,9 @@ Every Canvas cid MUST appear exactly once. Every "due" MUST be exactly YYYY-MM-D
             final_list.append(r)
 
         parsed["a"] = final_list
-        emit_usage_log(usage_payload)
-        parsed["_usage"] = usage_payload
         return parsed
 
     except Exception as e:
-        emit_usage_log(mark_usage_error(usage_payload, e))
         detail = f"LLM JSON parse failed: {type(e).__name__}: {e}"
         if AI_DEBUG:
             detail += f"\nRaw output head: {raw_text[:400]}"
@@ -785,7 +695,7 @@ OUTPUT: minified JSON only (no spaces, no newlines, no prose), schema:
 Every "due" MUST be exactly YYYY-MM-DD."""
 
     # --- STEP 4: CALL LLM ---
-    raw_text, usage_payload = _call_llm(
+    raw_text = _call_llm(
         full_prompt,
         operation="resync_assignment_dates",
         telemetry_context=telemetry_context,
@@ -793,16 +703,13 @@ Every "due" MUST be exactly YYYY-MM-DD."""
     
     try:
         parsed = _extract_first_json(raw_text)
-        
+
         if isinstance(parsed, list):
-            emit_usage_log(usage_payload)
-            return {"cc": "UNK", "a": parsed, "changes_summary": "Unknown", "_usage": usage_payload}
+            return {"cc": "UNK", "a": parsed, "changes_summary": "Unknown"}
         
         assign_list = parsed.get("a") or parsed.get("assignments") or []
         changes_summary = parsed.get("changes_summary", "No summary provided")
         canvas_names_resync = [str(a.get("name") or a.get("nam") or "").strip() for a in clean_canvas if a.get("name") or a.get("nam")]
-        
-        print(f"[RESYNC] AI changes summary: {changes_summary}")
         
         final_list = []
         for r in assign_list:
@@ -826,7 +733,6 @@ Every "due" MUST be exactly YYYY-MM-DD."""
             action = r.get("action", "KEEP").upper()
             
             if action == "REMOVE":
-                print(f"[RESYNC] Removing: {r.get('nam')} - {r.get('reason', 'No reason')}")
                 continue
             
             due = r.get("due") or r.get("normalized_due_at")
@@ -846,23 +752,14 @@ Every "due" MUST be exactly YYYY-MM-DD."""
             if not r.get("cid") and canvas_names_resync and _discovered_matches_canvas_item(
                 r.get("nam") or r.get("name") or "", canvas_names_resync
             ):
-                print(f"[RESYNC] Skipping duplicate of Canvas item: {r.get('nam')}")
                 continue
-            
-            if action == "UPDATE":
-                print(f"[RESYNC] Updating: {r.get('nam')} - {r.get('reason', 'No reason')}")
-            elif action == "ADD":
-                print(f"[RESYNC] Adding new: {r.get('nam')}")
             
             final_list.append(r)
 
         parsed["a"] = final_list
-        emit_usage_log(usage_payload)
-        parsed["_usage"] = usage_payload
         return parsed
         
     except Exception as e:
-        emit_usage_log(mark_usage_error(usage_payload, e))
         detail = f"LLM RESYNC JSON parse failed: {type(e).__name__}: {e}"
         if AI_DEBUG:
             detail += f"\nRaw output head: {raw_text[:400]}"

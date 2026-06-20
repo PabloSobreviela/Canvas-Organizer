@@ -38,8 +38,6 @@ import "sileo/styles.css";
 
 // GT-first default timezone, overridable for future non-GT tenants.
 const COURSE_TIMEZONE = process.env.REACT_APP_DEFAULT_COURSE_TIMEZONE || "America/New_York";
-const ENABLE_MANUAL_TOKEN_CONNECT =
-  (process.env.REACT_APP_ENABLE_MANUAL_TOKEN_CONNECT || "").trim().toLowerCase() === "true";
 const SHOW_PILOT_BANNER =
   (process.env.REACT_APP_SHOW_PILOT_BANNER || "").trim().toLowerCase() === "true";
 
@@ -213,7 +211,7 @@ function LandingDemoSquare() {
 }
 
 const SYNC_DEFAULT_TIMEOUT_MS = 30000;
-/** AI resolve sends large syllabus payloads to OpenRouter and often exceeds 30s. */
+/** AI resolve sends large syllabus payloads to DeepInfra and often exceeds 30s. */
 const AI_RESOLVE_TIMEOUT_MS = 120000;
 
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 8000) {
@@ -456,14 +454,14 @@ function getSourceStatusPills(item) {
     pills.push(makeSourcePill("Canvas", "canvas"));
   }
   if (hasMaterialsSource) {
-    pills.push(makeSourcePill("From materials", "materials"));
+    pills.push(makeSourcePill("AI-generated from materials", "materials"));
   }
 
   if (status === "RESOLVED") {
-    pills.push(makeSourcePill("Date updated", "updated"));
+    pills.push(makeSourcePill("AI-assisted date", "updated"));
   }
   if (status === "CONFLICT") {
-    pills.push(makeSourcePill("Review date", "review"));
+    pills.push(makeSourcePill("Review AI date", "review"));
   }
   if (!parseDueToDate(item?.due)) {
     pills.push(makeSourcePill("No date yet", "missing"));
@@ -1260,10 +1258,7 @@ function App() {
       if (!usedBootstrap) {
         // Fallback path for older backend revisions.
         const [credsRes, coursesRes, prefsRes] = await Promise.all([
-          fetchWithTimeout(`${API_BASE}/api/user/canvas-credentials`, apiFetchOptions(), 8000).catch(err => {
-            console.error(`Failed to fetch credentials from ${API_BASE}:`, err.message);
-            return null;
-          }),
+          Promise.resolve(null),
           fetchWithTimeout(`${API_BASE}/api/user/courses`, apiFetchOptions(), 8000).catch(err => {
             console.error(`Failed to fetch cached courses from ${API_BASE}:`, err.message);
             return null;
@@ -2734,244 +2729,8 @@ function App() {
     return Array.from(merged.values());
   }, [itemsByCourse]);
 
-  async function connectCanvas() {
-    const baseUrl = canvasBaseUrl.trim();
-    const token = canvasToken.trim();
-
-
-    if (!baseUrl) {
-      setCanvasStatus("Missing Canvas URL");
-      notifyUser({
-        tone: "warning",
-        title: "Enter your Canvas URL",
-        message: "Use your school’s Canvas address, such as https://gatech.instructure.com.",
-      });
-      return;
-    }
-    if (ENABLE_MANUAL_TOKEN_CONNECT && !token) {
-      setCanvasStatus("Missing access token");
-      notifyUser({
-        tone: "warning",
-        title: "Enter an access token",
-        message: "Canvas needs both the URL and token before it can connect.",
-      });
-      return;
-    }
-
-    setCanvasStatus("Connecting...");
-
-    try {
-      if (!isAuthenticated()) {
-        setCanvasStatus("Please sign in first");
-        notifyUser({
-          tone: "error",
-          title: "Sign in required",
-          message: "Sign in with Canvas, then return here to connect your account.",
-          duration: null,
-        });
-        return;
-      }
-      const authHeaders = {
-        "Content-Type": "application/json",
-      };
-
-      const testRes = await fetchWithTimeout(
-        `${API_BASE}/api/canvas/test`,
-        apiFetchOptions({
-          method: "POST",
-          headers: authHeaders,
-          body: JSON.stringify({ base_url: baseUrl, token }),
-        }),
-      );
-
-      const testData = await testRes.json();
-
-      if (!testData.valid) {
-        setCanvasStatus("Invalid token");
-        notifyUser({
-          tone: "error",
-          title: "Canvas rejected the connection",
-          message: "Check the Canvas URL and access token, then try again.",
-          duration: null,
-        });
-        return;
-      }
-
-      // Save credentials to server (tied to Google account)
-      const saveCredsRes = await fetchWithTimeout(
-        `${API_BASE}/api/user/canvas-credentials`,
-        apiFetchOptions({
-          method: "POST",
-          headers: authHeaders,
-          body: JSON.stringify({ base_url: baseUrl, token }),
-        }),
-      );
-      if (!saveCredsRes.ok) {
-        let detail = `status ${saveCredsRes.status}`;
-        try {
-          const j = await saveCredsRes.json();
-          if (j?.error) detail = j.error;
-        } catch (_) {
-          // ignore
-        }
-        // Continue with the session token so the user can at least proceed,
-        // but warn that reloads may require reconnecting if the server can't persist creds.
-        console.warn("Failed to persist Canvas credentials:", detail);
-        setCanvasStatus(`Warning: couldn't save credentials (${detail})`);
-        notifyUser({
-          tone: "warning",
-          title: "Connected for this session",
-          message: "Canvas responded, but the connection could not be saved. You may need to reconnect after reloading.",
-        });
-      }
-
-      // Keep only non-sensitive URL locally
-      localStorage.setItem("canvas_base_url", baseUrl);
-
-      setCanvasStatus("Fetching courses...");
-
-      const courseRes = await fetchWithTimeout(
-        `${API_BASE}/api/canvas/courses`,
-        apiFetchOptions({
-          method: "POST",
-          headers: authHeaders,
-          body: JSON.stringify({ base_url: baseUrl, token }),
-        }),
-      );
-
-      const courses = await courseRes.json();
-
-      // Check if courses API returned an error
-      if (!courseRes.ok) {
-        console.error('Courses API error:', courses);
-        const serverMsg = courses?.error ? `: ${courses.error}` : "";
-        setCanvasStatus(`Failed to fetch courses${serverMsg}`);
-        notifyUser({
-          tone: "error",
-          title: "Couldn’t load your classes",
-          message: courses?.error || "Canvas connected, but its course list could not be loaded.",
-          actionLabel: "Try again",
-          onAction: () => {
-            void connectCanvas();
-          },
-          duration: null,
-        });
-        return;
-      }
-
-      // Ensure courses is an array
-      if (!Array.isArray(courses)) {
-        console.error('Courses response is not an array:', courses);
-        setCanvasStatus("Invalid courses response");
-        notifyUser({
-          tone: "error",
-          title: "Canvas returned an unexpected response",
-          message: "Try connecting again. If this continues, the Canvas integration may need attention.",
-          duration: null,
-        });
-        return;
-      }
-
-      // Debug: Log course data to see what Canvas API returns
-      console.log('Canvas courses received:', courses.length);
-      if (courses.length > 0) {
-        console.log('Sample course with term data:', courses[0]);
-        courses.forEach(c => {
-          console.log(`Course: ${c.name?.substring(0, 40) || 'Unknown'} | concluded: ${c.concluded} | term: ${c.term?.name} | term_end: ${c.term?.end_at}`);
-        });
-      }
-
-      const existingCourseCodeById = Object.fromEntries(
-        activeCourses.map(c => [normalizeCourseId(c.id), c.courseCode])
-      );
-      const existingCourseStatusById = Object.fromEntries(
-        activeCourses.map(c => [normalizeCourseId(c.id), c.status])
-      );
-      const savedCourseSyncState = getSavedCourseSyncState(baseUrl, token);
-
-      const active = courses
-        .filter((c) => c.workflow_state === "available")
-        .map((c) => {
-          const cid = normalizeCourseId(c.id);
-          const now = new Date();
-          const backendActiveFlag = typeof c._app_is_currently_active === "boolean"
-            ? c._app_is_currently_active
-            : null;
-
-          // Canvas API returns 'concluded' flag when include[]=concluded is used
-          // Also returns 'term' object with term dates when include[]=term is used
-          const isConcluded = c.concluded === true;
-
-          // Use term end date if available (most reliable)
-          const termEndAt = c.term?.end_at ? new Date(c.term.end_at) : null;
-          const termStartAt = c.term?.start_at ? new Date(c.term.start_at) : null;
-
-          // Course dates as fallback
-          const courseEndAt = c.end_at ? new Date(c.end_at) : null;
-          const courseStartAt = c.start_at ? new Date(c.start_at) : null;
-
-          // Use term dates first, then course dates
-          const effectiveEndAt = termEndAt || courseEndAt;
-          const effectiveStartAt = termStartAt || courseStartAt;
-
-          // Determine if course is currently active
-          let isCurrentlyActive;
-
-          if (backendActiveFlag !== null) {
-            isCurrentlyActive = backendActiveFlag;
-          } else if (isConcluded) {
-            // Canvas explicitly says this course is concluded
-            isCurrentlyActive = false;
-          } else if (effectiveEndAt && now > effectiveEndAt) {
-            // Term/course has ended
-            isCurrentlyActive = false;
-          } else if (effectiveStartAt && effectiveEndAt) {
-            // Has both dates - check if we're in range
-            isCurrentlyActive = now >= effectiveStartAt && now <= effectiveEndAt;
-          } else if (effectiveStartAt && !effectiveEndAt) {
-            // Has start but no end - active if we're past start
-            isCurrentlyActive = now >= effectiveStartAt;
-          } else {
-            // No dates or flags: don't mark everything as active.
-            isCurrentlyActive = false;
-          }
-
-          return {
-            id: cid,
-            name: c.name,
-            courseCode: deriveCourseCode(existingCourseCodeById[cid] || c.course_code, c.name),
-            status: existingCourseStatusById[cid] || savedCourseSyncState[cid] || "NOT_SYNCED",
-            startAt: effectiveStartAt?.toISOString(),
-            endAt: effectiveEndAt?.toISOString(),
-            termName: c.term?.name || null,
-            isCurrentlyActive,
-          };
-        });
-
-      setActiveCourses(active);
-      if (canvasUser?.uid) {
-        setSavedCoursesCache(canvasUser.uid, baseUrl, active);
-      }
-      setCanvasStatus("Connected");
-      notifyUser({
-        tone: "success",
-        title: "Canvas connected",
-        message: `${active.length} ${active.length === 1 ? "class is" : "classes are"} available to select.`,
-      });
-    } catch (err) {
-      console.error('Canvas connection error:', err);
-      setCanvasStatus(`Connection failed: ${err.message || 'Network error'}`);
-      notifyUser({
-        tone: "error",
-        title: "Couldn’t connect to Canvas",
-        message: err.message || "Check your connection and try again.",
-        actionLabel: "Try again",
-        onAction: () => {
-          void connectCanvas();
-        },
-        duration: null,
-      });
-    }
+  function connectCanvas() {
+    signInWithCanvas();
   }
 
   async function disconnectCanvas() {
@@ -5030,14 +4789,6 @@ function App() {
                           <div>
                             Base URL: <span className="text-zinc-300">{canvasBaseUrl || "--"}</span>
                           </div>
-                          {ENABLE_MANUAL_TOKEN_CONNECT ? (
-                            <div>
-                              Token:{" "}
-                              <span className="text-zinc-300">
-                                {canvasToken ? `****${canvasToken.slice(-4)}` : "--"}
-                              </span>
-                            </div>
-                          ) : null}
                           <div>
                             Current font:{" "}
                             <span className="text-zinc-300">
@@ -5047,33 +4798,18 @@ function App() {
                         </div>
                       </div>
 
-                      {/* Canvas credentials */}
+                      {/* Canvas OAuth connection */}
                       <div>
                         <label className="block text-sm font-medium text-zinc-400 mb-2">
-                          Canvas URL
+                          Canvas instance
                         </label>
                         <input
                           value={canvasBaseUrl}
-                          onChange={(e) => setCanvasBaseUrl(e.target.value)}
-                          className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
+                          readOnly
+                          className="w-full bg-zinc-900 text-zinc-400 px-3 py-2 rounded border border-zinc-800"
                           placeholder="https://gatech.instructure.com"
                         />
                       </div>
-
-                      {ENABLE_MANUAL_TOKEN_CONNECT ? (
-                        <div>
-                          <label className="block text-sm font-medium text-zinc-400 mb-2">
-                            Access Token
-                          </label>
-                          <input
-                            type="password"
-                            value={canvasToken}
-                            onChange={(e) => setCanvasToken(e.target.value)}
-                            className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
-                            placeholder="Paste your Canvas token"
-                          />
-                        </div>
-                      ) : null}
 
                       <div className="flex gap-2 justify-end">
                         <button
@@ -5084,7 +4820,7 @@ function App() {
                           {canvasStatus === "Connecting..." || canvasStatus === "Fetching courses..." ? (
                             <Loader2 size={15} className="animate-spin" />
                           ) : null}
-                          {canvasStatus === "Fetching courses..." ? "Loading classes..." : canvasStatus === "Connecting..." ? "Connecting..." : "Connect"}
+                          Reconnect with Canvas OAuth
                         </button>
 
                         <button

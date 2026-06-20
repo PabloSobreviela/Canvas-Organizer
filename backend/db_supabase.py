@@ -156,11 +156,11 @@ def delete_all_user_data(user_id: str) -> None:
         from storage import delete_user_storage
         delete_user_storage(user_id)
     except Exception as exc:
-        logger.warning("Storage purge on delete failed for user %s: %s", user_id, exc)
+        logger.warning("Storage purge on account deletion failed: %s", type(exc).__name__)
     db = get_db()
     db.table("rate_limits").delete().eq("user_id", user_id).execute()
     db.table("users").delete().eq("id", user_id).execute()
-    logger.info("Deleted all data for user %s", user_id)
+    logger.info("Deleted all stored data for one user account")
 
 
 def _sanitize_export_row(table: str, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -168,16 +168,6 @@ def _sanitize_export_row(table: str, row: Dict[str, Any]) -> Dict[str, Any]:
     from app_config import STORE_RAW_CANVAS_JSON
 
     cleaned = dict(row)
-    if table == "ai_usage_logs":
-        raw = cleaned.get("raw_json")
-        if isinstance(raw, dict):
-            cleaned["raw_json"] = {
-                k: raw.get(k)
-                for k in ("operation", "model", "status", "input_tokens", "output_tokens")
-                if k in raw
-            }
-        else:
-            cleaned["raw_json"] = None
     if not STORE_RAW_CANVAS_JSON:
         cleaned.pop("raw_canvas_json", None)
         cleaned.pop("raw_json", None)
@@ -213,11 +203,11 @@ def export_all_user_data(user_id: str) -> Dict[str, Any]:
     }
 
     for table in ("courses", "assignments", "announcements",
-                  "course_file_texts", "syllabus_rules", "ai_usage_logs"):
+                  "course_file_texts", "syllabus_rules"):
         try:
             rows = db.table(table).select("*").eq("user_id", user_id).execute().data or []
         except Exception as exc:
-            logger.warning("export: failed to read %s for user %s: %s", table, user_id, exc)
+            logger.warning("User export failed to read %s: %s", table, type(exc).__name__)
             rows = []
         export[table] = [_sanitize_export_row(table, row) for row in rows]
 
@@ -429,7 +419,7 @@ def create_user(user_id: str, email: str, display_name: str = None) -> str:
         "last_login": now_ts,
     }).execute()
 
-    logger.info("Created user: %s (%s)", row_id, email)
+    logger.info("Created one user account")
     return row_id
 
 
@@ -509,7 +499,7 @@ def _user_row_to_dict(row: Dict) -> Dict:
     }
 
 
-LEGAL_CONSENT_VERSION = os.getenv("LEGAL_CONSENT_VERSION", "2026-05-20")
+LEGAL_CONSENT_VERSION = os.getenv("LEGAL_CONSENT_VERSION", "2026-06-19")
 
 
 def user_has_legal_consent(user_id: str) -> bool:
@@ -531,7 +521,8 @@ def user_has_legal_consent(user_id: str) -> bool:
 def get_user_session_version(user_id: str) -> int:
     user = get_user(user_id)
     if not user:
-        return 0
+        # A deleted or unknown user must never validate an old sv=0 JWT.
+        return -1
     try:
         return int(user.get("sessionVersion") or 0)
     except (TypeError, ValueError):
@@ -1519,174 +1510,6 @@ def get_reading_items(user_id: str, course_id: str, canvas_credential_key: str =
 
 
 # =============================================================================
-# AI USAGE LOG OPERATIONS
-# =============================================================================
-
-def _ai_usage_row_to_dict(row: Dict[str, Any], raw_data: Dict[str, Any] = None) -> Dict[str, Any]:
-    raw_data = raw_data if isinstance(raw_data, dict) else {}
-    if not raw_data and isinstance(row.get("raw_json"), dict):
-        raw_data = row.get("raw_json") or {}
-    if not raw_data and isinstance(row.get("raw_json"), str):
-        try:
-            raw_data = json.loads(row.get("raw_json") or "{}")
-        except Exception:
-            raw_data = {}
-
-    return {
-        "id": str(row.get("id") or ""),
-        "userId": str(row.get("user_id") or raw_data.get("user_id") or ""),
-        "courseId": row.get("course_id"),
-        "requestId": row.get("request_id"),
-        "operation": row.get("operation"),
-        "model": row.get("model"),
-        "llmProvider": raw_data.get("gen_ai.system") or raw_data.get("llm_provider"),
-        "inputTokens": int(row.get("input_tokens") or 0),
-        "outputTokens": int(row.get("output_tokens") or 0),
-        "totalTokens": int(row.get("total_tokens") or 0),
-        "cachedTokens": int(row.get("cached_tokens") or 0),
-        "estimatedCostUsd": float(row.get("estimated_cost_usd") or 0.0),
-        "currency": row.get("currency") or "USD",
-        "pricingSource": row.get("pricing_source") or "unconfigured",
-        "status": row.get("status") or "ok",
-        "promptChars": int(row.get("prompt_chars") or 0),
-        "isResync": bool(row.get("is_resync")) if row.get("is_resync") is not None else None,
-        "createdAt": row.get("created_at"),
-        "promptText": "",
-        "responseText": "",
-        "errorType": raw_data.get("error_type"),
-        "errorMessage": raw_data.get("error_message"),
-        "raw": raw_data,
-    }
-
-
-def save_ai_usage_log(
-    user_id: str,
-    log_data: Dict[str, Any],
-    canvas_credential_key: str = None,
-) -> str:
-    """Persist a single AI usage event."""
-    db = get_db()
-    now_ts = now_iso()
-
-    payload = {
-        "user_id": user_id,
-        "course_id": str(log_data.get("course_id") or ""),
-        "request_id": str(log_data.get("request_id") or ""),
-        "operation": str(log_data.get("operation") or ""),
-        "model": str(log_data.get("model") or ""),
-        "input_tokens": int(log_data.get("input_tokens") or 0),
-        "output_tokens": int(log_data.get("output_tokens") or 0),
-        "total_tokens": int(log_data.get("total_tokens") or 0),
-        "cached_tokens": int(log_data.get("cached_tokens") or 0),
-        "estimated_cost_usd": float(log_data.get("estimated_cost_usd") or 0.0),
-        "currency": str(log_data.get("currency") or "USD"),
-        "pricing_source": str(log_data.get("pricing_source") or "unconfigured"),
-        "status": str(log_data.get("status") or "ok"),
-        "prompt_chars": int(log_data.get("prompt_chars") or 0),
-        "is_resync": bool(log_data.get("is_resync")) if log_data.get("is_resync") is not None else None,
-        "canvas_credential_key": canvas_credential_key,
-        "raw_json": log_data or {},
-        "created_at": now_ts,
-    }
-
-    resp = db.table("ai_usage_logs").insert(payload).execute()
-    if resp.data:
-        return str(resp.data[0]["id"])
-    return ""
-
-
-def get_ai_usage_logs(
-    user_id: str,
-    *,
-    limit: int = 50,
-    course_id: str = None,
-    canvas_credential_key: str = None,
-) -> List[Dict[str, Any]]:
-    """Return latest AI usage log entries for a user."""
-    db = get_db()
-
-    try:
-        requested_limit = int(limit or 50)
-    except (TypeError, ValueError):
-        requested_limit = 50
-    requested_limit = max(1, min(requested_limit, 200))
-
-    query = (
-        db.table("ai_usage_logs")
-        .select("*")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(requested_limit * 3)
-    )
-    if course_id:
-        query = query.eq("course_id", str(course_id))
-    if canvas_credential_key:
-        query = query.eq("canvas_credential_key", canvas_credential_key)
-
-    resp = query.limit(requested_limit).execute()
-
-    logs: List[Dict[str, Any]] = []
-    for row in (resp.data or []):
-        raw_data = row.get("raw_json") or {}
-        if isinstance(raw_data, str):
-            try:
-                raw_data = json.loads(raw_data)
-            except Exception:
-                raw_data = {}
-
-        logs.append(_ai_usage_row_to_dict(row, raw_data))
-
-        if len(logs) >= requested_limit:
-            break
-
-    return logs
-
-
-def get_all_ai_usage_logs(
-    *,
-    limit: int = 100,
-    model_filter: str = None,
-) -> List[Dict[str, Any]]:
-    """Return recent AI usage logs across all users (testing dashboard)."""
-    db = get_db()
-
-    try:
-        requested_limit = int(limit or 100)
-    except (TypeError, ValueError):
-        requested_limit = 100
-    requested_limit = max(1, min(requested_limit, 500))
-
-    fetch_limit = requested_limit * 4 if model_filter else requested_limit
-    resp = (
-        db.table("ai_usage_logs")
-        .select("*")
-        .order("created_at", desc=True)
-        .limit(fetch_limit)
-        .execute()
-    )
-
-    model_needle = (model_filter or "").strip().lower()
-    logs: List[Dict[str, Any]] = []
-    for row in (resp.data or []):
-        raw_data = row.get("raw_json") or {}
-        if isinstance(raw_data, str):
-            try:
-                raw_data = json.loads(raw_data)
-            except Exception:
-                raw_data = {}
-
-        model_name = str(row.get("model") or "").lower()
-        if model_needle and model_needle not in model_name:
-            continue
-
-        logs.append(_ai_usage_row_to_dict(row, raw_data))
-        if len(logs) >= requested_limit:
-            break
-
-    return logs
-
-
-# =============================================================================
 # RETENTION / PURGE (docs/OIT_READINESS_AUDIT.md, R4)
 # =============================================================================
 
@@ -1786,7 +1609,6 @@ def purge_inactive_user_content(days: int) -> dict:
         "course_file_texts",
         "syllabus_rules",
         "courses",
-        "ai_usage_logs",
     )
     counts: Dict[str, int] = {}
     for table in tables:
@@ -1796,7 +1618,7 @@ def purge_inactive_user_content(days: int) -> dict:
                 resp = db.table(table).delete().eq("user_id", uid).execute()
                 deleted += len(resp.data) if resp.data else 0
             except Exception as exc:
-                logger.warning("inactive purge %s for %s failed: %s", table, uid, exc)
+                logger.warning("Inactive-content purge failed for %s: %s", table, type(exc).__name__)
         counts[table] = deleted
 
     for uid in user_ids:
@@ -1804,7 +1626,7 @@ def purge_inactive_user_content(days: int) -> dict:
             from storage import delete_user_storage
             delete_user_storage(uid)
         except Exception as exc:
-            logger.warning("inactive storage purge for %s failed: %s", uid, exc)
+            logger.warning("Inactive-content storage purge failed: %s", type(exc).__name__)
 
     return {"users": len(user_ids), "tables": counts}
 
@@ -1815,13 +1637,6 @@ def purge_announcements_older_than(days: int) -> int:
         return 0
     # announcements have no created_at; posted_at (ISO text) is the post date.
     return _delete_older_than("announcements", "posted_at", cutoff)
-
-
-def purge_ai_usage_logs_older_than(days: int) -> int:
-    cutoff = _cutoff_iso(days)
-    if not cutoff:
-        return 0
-    return _delete_older_than("ai_usage_logs", "created_at", cutoff)
 
 
 # =============================================================================

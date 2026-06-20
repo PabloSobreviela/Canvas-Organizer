@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { API_BASE } from "../config";
 import { apiFetchOptions } from "../auth";
 
-const CONSENT_VERSION = "2026-05-20";
+const CONSENT_VERSION = "2026-06-19";
 
 export function ConsentModal({ onAccepted }) {
   const [agreed, setAgreed] = useState(false);
@@ -58,8 +58,8 @@ export function ConsentModal({ onAccepted }) {
               <h3 className="text-sm font-medium text-zinc-100">Canvas access</h3>
               <p className="mt-1 text-zinc-400">
                 We use read-only Canvas OAuth access for course calendars, assignments, modules, files,
-                announcements, and syllabus text. We do not write to Canvas, and we do not collect grades or
-                submissions.
+                announcements, syllabus text, and assignment completion/submission status. We do not write to
+                Canvas, and we do not collect grades, submitted work, or submission comments.
               </p>
             </section>
 
@@ -67,19 +67,20 @@ export function ConsentModal({ onAccepted }) {
               <h3 className="text-sm font-medium text-zinc-100">AI processing</h3>
               <p className="mt-1 text-zinc-400">
                 For missing dates, we send the minimum course text needed for extraction, such as syllabus excerpts,
-                assignment titles, and short announcement snippets. Requests go through{" "}
-                <strong className="text-zinc-100">OpenRouter</strong> and are pinned to{" "}
-                <strong className="text-zinc-100">DeepInfra</strong> with zero-data-retention required, data
-                collection denied, and provider fallback disabled. If that route is unavailable, the request should
-                fail instead of using another provider.
+                assignment titles, and short announcement snippets. Requests go directly to{" "}
+                <strong className="text-zinc-100">DeepInfra</strong> using the{" "}
+                <strong className="text-zinc-100">Qwen3-235B-A22B-Instruct-2507</strong> model.
+                No AI gateway or alternate-provider fallback is used. DeepInfra says ordinary inference content is
+                processed in memory and not used for training, but reserves the right to log a small portion of
+                requests for debugging or security.
               </p>
             </section>
 
             <section className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
               <h3 className="text-sm font-medium text-zinc-100">Privacy limits</h3>
               <p className="mt-1 text-zinc-400">
-                We do not intentionally include your name, email, Canvas user ID, full prompts, or full AI
-                completions in stored AI logs. Course text is not guaranteed anonymous: syllabi and announcements can
+                We do not intentionally include your name, email, or Canvas user ID, and we do not store AI prompts,
+                completions, or token-usage logs. Course text is not guaranteed anonymous: syllabi and announcements can
                 contain instructor names, emails, student names, office locations, or other identifiers. We redact
                 common patterns before sending, but incidental identifying information may remain.
               </p>
@@ -88,7 +89,9 @@ export function ConsentModal({ onAccepted }) {
             <section className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
               <h3 className="text-sm font-medium text-zinc-100">Your controls</h3>
               <p className="mt-1 text-zinc-400">
-                You can export or delete stored data from Settings, or by contacting us.
+                You can export or permanently delete stored data from Settings, or by contacting us. Logging out
+                revokes the stored Canvas OAuth tokens. Synced course content is subject to a 180-day retention
+                window.
               </p>
             </section>
           </div>

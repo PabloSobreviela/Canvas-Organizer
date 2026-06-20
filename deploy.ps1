@@ -20,7 +20,7 @@
 #   supabase-service-key          -> SUPABASE_SERVICE_KEY
 #   canvas-oauth-client-id        -> CANVAS_OAUTH_CLIENT_ID
 #   canvas-oauth-client-secret    -> CANVAS_OAUTH_CLIENT_SECRET
-#   openrouter-api-key            -> LLM_API_KEY
+#   deepinfra-api-key             -> DEEPINFRA_API_KEY (only when -EnableAiResolve)
 # A distributed RATELIMIT_STORAGE_URI (for example redis://...) is required for
 # general launch. The temporary in-memory switch exists only so containment and
 # other security fixes can be deployed before that service is provisioned.
@@ -32,14 +32,15 @@ param(
     [string]$ServiceName = "canvas-organizer-backend",
 
     # Non-secret runtime config:
-    [Parameter(Mandatory = $true)][string]$FrontendUrl,            # e.g. https://canvassync.app
+    [Parameter(Mandatory = $true)][string]$FrontendUrl,            # e.g. https://canvas-organizer.vercel.app
     [Parameter(Mandatory = $true)][string]$CanvasOAuthRedirectUri, # e.g. https://<backend>/api/auth/canvas/callback
     [string]$CanvasInstanceUrl = "https://gatech.instructure.com",
     [string]$SupabaseStorageBucket = "course-files",
-    [string]$ModelName = "qwen/qwen3.5-flash-02-23",
+    [string]$ModelName = "Qwen/Qwen3-235B-A22B-Instruct-2507",
     [string]$RateLimitStorageUri = "memory://",
 
     [switch]$AllowTemporaryInMemoryRateLimits,
+    [switch]$EnableAiResolve,
     [switch]$DryRun
 )
 
@@ -60,7 +61,9 @@ $requiredSecrets = [ordered]@{
     "supabase-service-key"        = "SUPABASE_SERVICE_KEY"
     "canvas-oauth-client-id"      = "CANVAS_OAUTH_CLIENT_ID"
     "canvas-oauth-client-secret"  = "CANVAS_OAUTH_CLIENT_SECRET"
-    "openrouter-api-key"          = "LLM_API_KEY"
+}
+if ($EnableAiResolve) {
+    $requiredSecrets["deepinfra-api-key"] = "DEEPINFRA_API_KEY"
 }
 
 cmd /c "gcloud config set project $ProjectId 2>nul"
@@ -100,16 +103,18 @@ $envVarsList = @(
     "CANVAS_INSTANCE_URL=$CanvasInstanceUrl",
     "SUPABASE_STORAGE_BUCKET=$SupabaseStorageBucket",
     "MODEL_NAME=$ModelName",
-    "LLM_BASE_URL=https://openrouter.ai/api/v1",
-    "OPENROUTER_PROVIDER_ONLY=deepinfra",
-    "OPENROUTER_ENFORCE_ZDR=true",
-    "OPENROUTER_DENY_DATA_COLLECTION=true",
-    "OPENROUTER_ALLOW_FALLBACK=false",
+    "LLM_BASE_URL=https://api.deepinfra.com/v1/openai",
+    ("ENABLE_AI_RESOLVE=" + $(if ($EnableAiResolve) { "true" } else { "false" })),
+    "LEGAL_CONSENT_VERSION=2026-06-19",
     "RATELIMIT_STORAGE_URI=$RateLimitStorageUri",
     ("ALLOW_IN_MEMORY_RATE_LIMITS=" + $(if ($AllowTemporaryInMemoryRateLimits) { "true" } else { "false" })),
     "STORE_RAW_CANVAS_JSON=false",
-    "ENABLE_AI_USAGE_LOGS_DASHBOARD=false",
-    "ENABLE_CLOUD_COST_AUDIT_ENDPOINT=false",
+    "COURSE_FILE_TEXT_RETENTION_DAYS=180",
+    "ANNOUNCEMENT_RETENTION_DAYS=180",
+    "ASSIGNMENT_RETENTION_DAYS=180",
+    "COURSE_RETENTION_DAYS=180",
+    "SYLLABUS_RULES_RETENTION_DAYS=180",
+    "INACTIVE_USER_CONTENT_PURGE_DAYS=180",
     "ENABLE_DEMO_SESSION=true"
 )
 $envVars = $envVarsList -join ","

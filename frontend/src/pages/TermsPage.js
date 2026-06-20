@@ -43,15 +43,20 @@ export default function TermsPage() {
       <LegalSection title="5. Canvas and third-party services">
         <p>
           The Service uses Canvas APIs under your authorization. We use Supabase (database), Google Cloud (API
-          hosting), Vercel (web app), and OpenRouter (AI routing) as subprocessors. Their terms apply to their
+          hosting), Vercel (web app), and DeepInfra (direct AI inference) as subprocessors. Their terms apply to their
           respective services.
+        </p>
+        <p>
+          You and Georgia Tech retain ownership of Canvas information and materials, including information derived
+          from those materials through AI processing. Using CanvasSync does not transfer ownership to us.
         </p>
       </LegalSection>
 
       <LegalSection title="6. Disclaimers">
         <p>
           The Service is provided <strong className="text-zinc-100">“as is”</strong> without warranty. Due dates
-          inferred by AI or parsed from syllabi may be wrong. Always verify deadlines in Canvas. We are not
+          inferred by AI or parsed from syllabi may be wrong. AI-generated and AI-assisted dates are labeled in the
+          app. Always verify deadlines in Canvas. We are not
           liable for missed assignments, incorrect dates, or academic consequences.
         </p>
       </LegalSection>

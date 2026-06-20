@@ -2,7 +2,6 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
-import PrivateTestingLogsPage from './pages/PrivateTestingLogsPage';
 import TermsPage from './pages/TermsPage';
 import PrivacyPage from './pages/PrivacyPage';
 import reportWebVitals from './reportWebVitals';
@@ -35,9 +34,6 @@ function RootApp() {
   }
 
   const path = normalizePath(window.location.pathname);
-  if (path === '/privatetestinglogs') {
-    return <PrivateTestingLogsPage />;
-  }
   if (path === '/terms') {
     return <TermsPage />;
   }

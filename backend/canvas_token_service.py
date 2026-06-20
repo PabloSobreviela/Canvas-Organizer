@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 CANVAS_OAUTH_CLIENT_ID = os.getenv("CANVAS_OAUTH_CLIENT_ID", "")
 CANVAS_OAUTH_CLIENT_SECRET = os.getenv("CANVAS_OAUTH_CLIENT_SECRET", "")
 CANVAS_INSTANCE_URL = os.getenv("CANVAS_INSTANCE_URL", "https://gatech.instructure.com").rstrip("/")
+CANVASSYNC_USER_AGENT = os.getenv(
+    "CANVASSYNC_USER_AGENT",
+    "CanvasSync/1.0 (Georgia Tech student-built app; canvassync@gatech.edu)",
+)
 
 try:
     TOKEN_REFRESH_BUFFER_SECONDS = int(os.getenv("CANVAS_TOKEN_REFRESH_BUFFER_SECONDS", "300"))
@@ -64,6 +68,7 @@ def refresh_canvas_access_token(
     try:
         resp = requests.post(
             f"{instance}/login/oauth2/token",
+            headers={"User-Agent": CANVASSYNC_USER_AGENT},
             data={
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
@@ -73,15 +78,11 @@ def refresh_canvas_access_token(
             timeout=15,
         )
     except requests.RequestException as exc:
-        logger.warning("Canvas token refresh request failed for user %s: %s", user_id, exc)
+        logger.warning("Canvas token refresh request failed: %s", type(exc).__name__)
         return None
 
     if resp.status_code != 200:
-        logger.warning(
-            "Canvas token refresh failed for user %s: HTTP %s",
-            user_id,
-            resp.status_code,
-        )
+        logger.warning("Canvas token refresh failed: HTTP %s", resp.status_code)
         return None
 
     return resp.json()
@@ -103,11 +104,14 @@ def revoke_canvas_tokens(user_id: str) -> bool:
         try:
             requests.delete(
                 f"{api_url}/login/oauth2/token",
-                headers={"Authorization": f"Bearer {access_token}"},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "User-Agent": CANVASSYNC_USER_AGENT,
+                },
                 timeout=10,
             )
         except requests.RequestException as exc:
-            logger.warning("Canvas token revoke failed for user %s: %s", user_id, exc)
+            logger.warning("Canvas token revoke failed: %s", type(exc).__name__)
 
     from db_supabase import get_db
 

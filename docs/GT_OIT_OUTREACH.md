@@ -40,10 +40,10 @@ I am a Georgia Tech student building **CanvasSync**, a student productivity web 
 **Integration model:** Canvas OAuth2 authorization-code flow with PKCE. Each student authorizes read-only access to their **own** Canvas data. We do not write to Canvas and do not access other users' data.
 
 **Architecture:**
-- Frontend: React SPA on Vercel (`https://canvassync.app`)
+- Frontend: React SPA on Vercel (`https://canvas-organizer.vercel.app`; a custom domain is future work)
 - Backend: Flask on Google Cloud Run
 - Database: Supabase (Postgres + RLS, encrypted OAuth tokens)
-- AI: OpenRouter → DeepInfra (zero-data-retention routing) for due-date extraction from course text
+- AI: Direct DeepInfra `Qwen/Qwen3-235B-A22B-Instruct-2507` inference for due-date extraction from course text
 
 **Redirect URI (production):** `{YOUR_CLOUD_RUN_URL}/api/auth/canvas/callback`
 **Canvas instance:** `https://gatech.instructure.com`
@@ -51,20 +51,26 @@ I am a Georgia Tech student building **CanvasSync**, a student productivity web 
 **Read-only scopes requested:**
 - `url:GET|/api/v1/users/self`
 - `url:GET|/api/v1/courses`
+- `url:GET|/api/v1/courses/:id`
 - `url:GET|/api/v1/courses/:course_id/assignments`
 - `url:GET|/api/v1/courses/:course_id/files`
+- `url:GET|/api/v1/files/:id`
 - `url:GET|/api/v1/courses/:course_id/modules`
+- `url:GET|/api/v1/courses/:course_id/front_page`
 - `url:GET|/api/v1/courses/:course_id/pages`
+- `url:GET|/api/v1/courses/:course_id/pages/:url_or_id`
 - `url:GET|/api/v1/announcements`
 
-We request `require_scopes=true` and no write scopes on the developer key.
+We request `require_scopes=true`, `allow_includes=true`, and no write scopes on
+the developer key. The assignments include is used only for the current
+student's submission/completion state.
 
 **Question:** GT's published LTI vetting process (Jan 2026) applies to new LTI integrations. CanvasSync is **not** an LTI tool — it is an external OAuth2 REST client. **Can we proceed with a root-account Canvas Developer Key for this model, or must all new Canvas-connected student tools use the LTI 1.3 path?**
 
 Attached / linked documentation:
 - `docs/OIT_SUBMISSION.md` — full submission package
 - `docs/OIT_FULL_AUDIT_2026-06-06.md` — security and data-handling audit
-- Privacy policy: `https://canvassync.app/privacy`
+- Privacy policy: `https://canvas-organizer.vercel.app/privacy`
 
 Thank you for your guidance.
 
@@ -75,5 +81,5 @@ Thank you for your guidance.
 - [ ] `docs/OIT_SUBMISSION.md`
 - [ ] `docs/OIT_FULL_AUDIT_2026-06-06.md`
 - [ ] Architecture diagram (from README)
-- [ ] OpenRouter privacy settings screenshot (account I/O logging off)
+- [ ] DeepInfra account privacy/logging/retention settings evidence
 - [ ] `docs/verification/verify_deploy_results.json` (after staging deploy)

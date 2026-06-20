@@ -33,7 +33,6 @@ COPY demo_memory_store.py ./
 COPY db_supabase.py ./
 COPY db.py ./
 COPY storage.py ./
-COPY cloud_cost_audit.py ./
 COPY timezone_utils.py ./
 COPY ai ./ai
 COPY parsers ./parsers
@@ -48,10 +47,8 @@ RUN mkdir -p data/storage
 # Environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
-ENV MODEL_NAME=qwen/qwen3.5-flash-02-23
-ENV FALLBACK_MODEL=Qwen/Qwen3-14B
-ENV LLM_BASE_URL=https://openrouter.ai/api/v1
-ENV LLM_FALLBACK_BASE_URL=https://api.deepinfra.com/v1/openai
+ENV MODEL_NAME=Qwen/Qwen3-235B-A22B-Instruct-2507
+ENV LLM_BASE_URL=https://api.deepinfra.com/v1/openai
 
 # Expose port
 EXPOSE 8080

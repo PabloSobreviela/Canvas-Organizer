@@ -1,4 +1,4 @@
-# LLM inference (OpenAI-compatible API — OpenRouter, DeepInfra)
+# LLM inference (DeepInfra OpenAI-compatible API)
 openai>=1.30.0
 
 # Flask backend
@@ -62,11 +62,6 @@ supabase>=2.0.0
 # JWT SESSION TOKENS
 # ============================================
 PyJWT>=2.8.0
-
-# OpenTelemetry (structured AI token/cost logs)
-opentelemetry-api>=1.27.0
-opentelemetry-sdk>=1.27.0
-opentelemetry-exporter-otlp-proto-http>=1.27.0
 
 # Production WSGI server
 gunicorn>=21.2.0

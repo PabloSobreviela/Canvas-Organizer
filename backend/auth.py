@@ -39,15 +39,23 @@ CANVAS_OAUTH_CLIENT_SECRET = os.getenv("CANVAS_OAUTH_CLIENT_SECRET", "")
 CANVAS_INSTANCE_URL = os.getenv("CANVAS_INSTANCE_URL", "https://gatech.instructure.com").rstrip("/")
 CANVAS_OAUTH_REDIRECT_URI = os.getenv("CANVAS_OAUTH_REDIRECT_URI", "")
 SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", "")
+CANVASSYNC_USER_AGENT = os.getenv(
+    "CANVASSYNC_USER_AGENT",
+    "CanvasSync/1.0 (Georgia Tech student-built app; canvassync@gatech.edu)",
+)
 
 # Space-separated Canvas OAuth scopes (must be subset of developer key scopes).
 _DEFAULT_CANVAS_SCOPES = " ".join([
     "url:GET|/api/v1/users/self",
     "url:GET|/api/v1/courses",
+    "url:GET|/api/v1/courses/:id",
     "url:GET|/api/v1/courses/:course_id/assignments",
     "url:GET|/api/v1/courses/:course_id/files",
+    "url:GET|/api/v1/files/:id",
     "url:GET|/api/v1/courses/:course_id/modules",
+    "url:GET|/api/v1/courses/:course_id/front_page",
     "url:GET|/api/v1/courses/:course_id/pages",
+    "url:GET|/api/v1/courses/:course_id/pages/:url_or_id",
     "url:GET|/api/v1/announcements",
 ])
 CANVAS_OAUTH_SCOPES = (os.getenv("CANVAS_OAUTH_SCOPES") or _DEFAULT_CANVAS_SCOPES).strip()
@@ -56,7 +64,11 @@ SESSION_TOKEN_EXPIRY_HOURS = int(os.getenv("SESSION_TOKEN_EXPIRY_HOURS", "24"))
 SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "canvassync_session")
 OAUTH_CTX_COOKIE_NAME = os.getenv("OAUTH_CTX_COOKIE_NAME", "canvassync_oauth_ctx")
 
-from app_config import IS_PRODUCTION as _is_production, CLOUD_MODE as _cloud_mode
+from app_config import (
+    IS_PRODUCTION as _is_production,
+    CLOUD_MODE as _cloud_mode,
+    ENABLE_AI_RESOLVE as _ai_enabled,
+)
 
 try:
     AUTH_TOKEN_CACHE_SECONDS = int(os.getenv("AUTH_TOKEN_CACHE_SECONDS", "300"))
@@ -88,6 +100,15 @@ AUTH_DEBUG = os.getenv("AUTH_DEBUG", "").strip().lower() in {"1", "true", "yes",
 _AUTH_CACHE_LOCK = threading.Lock()
 _TOKEN_INFO_CACHE: dict[str, dict] = {}
 _USER_SYNC_CACHE: dict[str, dict] = {}
+
+
+def canvas_oauth_is_configured() -> bool:
+    """Return false for missing or intentionally pending GT developer-key values."""
+    values = (CANVAS_OAUTH_CLIENT_ID, CANVAS_OAUTH_CLIENT_SECRET, CANVAS_OAUTH_REDIRECT_URI)
+    if not all(str(value or "").strip() for value in values):
+        return False
+    combined = " ".join(str(value).strip().lower() for value in values)
+    return not any(marker in combined for marker in ("placeholder", "replace-me", "your-client"))
 
 
 def validate_production_secrets():
@@ -134,9 +155,9 @@ def validate_production_secrets():
                 "Production is using explicitly approved temporary in-memory rate limits. "
                 "Configure a distributed RATELIMIT_STORAGE_URI before general launch."
             )
-        llm_key = (os.getenv("LLM_API_KEY") or os.getenv("OPENROUTER_API_KEY") or "").strip()
-        if not llm_key or llm_key == "your-openrouter-api-key":
-            missing.append("LLM_API_KEY (OpenRouter API key for AI date extraction)")
+        llm_key = (os.getenv("DEEPINFRA_API_KEY") or os.getenv("LLM_API_KEY") or "").strip()
+        if _ai_enabled and (not llm_key or llm_key == "your-deepinfra-api-key"):
+            missing.append("DEEPINFRA_API_KEY (direct DeepInfra key for AI date extraction)")
 
     if missing:
         raise RuntimeError(
@@ -332,7 +353,7 @@ def _session_is_valid(payload: dict) -> bool:
     try:
         expected = get_user_session_version(str(user_id))
     except Exception as exc:
-        logger.warning("session version lookup failed for %s: %s", user_id, exc)
+        logger.warning("Session-version lookup failed: %s", type(exc).__name__)
         return False
     try:
         token_sv = int(payload.get("sv", 0))
@@ -508,6 +529,12 @@ def optional_auth(f):
 
 def canvas_oauth_login():
     """Initiate Canvas OAuth2 login with PKCE and signed state cookie."""
+    if not canvas_oauth_is_configured():
+        return jsonify({
+            "error": "Canvas OAuth is pending Georgia Tech developer-key approval.",
+            "code": "CANVAS_OAUTH_PENDING",
+        }), 503
+
     state = secrets.token_urlsafe(24)
     code_verifier = secrets.token_urlsafe(64)
     ctx = {
@@ -563,6 +590,7 @@ def canvas_oauth_callback():
 
     token_response = requests.post(
         f"{CANVAS_INSTANCE_URL}/login/oauth2/token",
+        headers={"User-Agent": CANVASSYNC_USER_AGENT},
         data={
             "grant_type": "authorization_code",
             "code": code,
@@ -588,7 +616,11 @@ def canvas_oauth_callback():
 
     user_response = requests.get(
         f"{CANVAS_INSTANCE_URL}/api/v1/users/self",
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json+canvas-string-ids",
+            "User-Agent": CANVASSYNC_USER_AGENT,
+        },
         timeout=10,
     )
 
@@ -682,7 +714,7 @@ def create_dev_token(user_id: str = "dev-user-001", email: str = "dev@localhost"
     try:
         ensure_user_exists(user_id, email, name)
     except Exception as e:
-        logger.warning("Dev token user sync skipped for %s: %s", user_id, e)
+        logger.warning("Development token user sync skipped: %s", type(e).__name__)
     return _issue_session_jwt(user_id, email, name, session_version=get_user_session_version(user_id))
 
 
@@ -697,11 +729,11 @@ def create_demo_token(
         from db_supabase import upsert_user_with_id
         upsert_user_with_id(user_id, email, name)
     except Exception as e:
-        logger.warning("Demo token user sync skipped for %s: %s", user_id, e)
+        logger.warning("Demo token user sync skipped: %s", type(e).__name__)
     try:
         session_version = get_user_session_version(user_id)
     except Exception as e:
-        logger.warning("Demo session version lookup skipped for %s: %s", user_id, e)
+        logger.warning("Demo session-version lookup skipped: %s", type(e).__name__)
         session_version = 0
     return _issue_session_jwt(
         user_id, email, name, extra_claims={"demo": True},

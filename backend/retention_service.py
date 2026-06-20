@@ -12,10 +12,6 @@ run either:
 
   - as a scheduled Cloud Run Job:   python retention_service.py
 
-  - via an authenticated cron endpoint: POST /api/admin/retention/run
-
-
-
 Retention windows are defined in app_config.py and overridable via env vars.
 
 A value of 0 disables purging for that category.
@@ -39,8 +35,6 @@ from db_supabase import (
     purge_course_file_texts_older_than,
 
     purge_announcements_older_than,
-
-    purge_ai_usage_logs_older_than,
 
     purge_assignments_older_than,
 
@@ -93,12 +87,6 @@ def run_retention() -> dict:
         "syllabus_rules": purge_syllabus_rules_older_than(
 
             app_config.SYLLABUS_RULES_RETENTION_DAYS
-
-        ),
-
-        "ai_usage_logs": purge_ai_usage_logs_older_than(
-
-            app_config.AI_USAGE_LOG_RETENTION_DAYS
 
         ),
 

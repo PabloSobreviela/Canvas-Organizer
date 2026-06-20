@@ -50,7 +50,7 @@ from app_config import (
     CLOUD_MODE,
     IS_PRODUCTION,
     STORE_RAW_CANVAS_JSON,
-    RETENTION_CRON_SECRET,
+    ENABLE_AI_RESOLVE,
     describe as _describe_env,
 )
 logger.info("BOOT: %s", _describe_env())
@@ -66,16 +66,15 @@ if CLOUD_MODE:
         save_announcement, get_course_announcements,
         save_syllabus_rules, get_syllabus_rules,
         get_reading_items, update_course_metadata, get_course,
-        get_user_canvas_credentials, update_user_canvas_credentials,
+        get_user_canvas_credentials,
         build_canvas_account_key,
         consume_hourly_rate_limit,
         get_user_preferences, update_user_preferences,
         archive_course_file_texts, save_course_file_text_versioned,
         get_course_sync_version, increment_course_sync_version,
         cleanup_old_file_versions,
-        save_ai_usage_log, get_ai_usage_logs, get_all_ai_usage_logs
     )
-    from auth import require_auth, optional_auth
+    from auth import require_auth, optional_auth, clear_session_cookie
     logger.info("MODE: CLOUD (Supabase + Canvas OAuth)")
 else:
     # Local mode: Use SQLite (legacy)
@@ -132,7 +131,7 @@ def require_consent(f):
             from db_supabase import user_has_legal_consent
             has_consent = user_has_legal_consent(request.user_id)
         except Exception as exc:
-            logger.warning("Consent check failed for user %s: %s", getattr(request, "user_id", "?"), exc)
+            logger.warning("Consent check failed: %s", type(exc).__name__)
             has_consent = False
         if not has_consent:
             return jsonify({
@@ -222,16 +221,10 @@ limiter = Limiter(
 # (OPTIONS). If preflight does not return Access-Control-Allow-Origin, the browser
 # will block *all* API calls with "No 'Access-Control-Allow-Origin' header ...".
 
-_DEFAULT_ALLOWED_ORIGINS = [
-    "https://canvassync.app",
-    "https://www.canvassync.app",
-]
+_DEFAULT_ALLOWED_ORIGINS = []
 
 # Vercel preview and production deployments
-_DEFAULT_ALLOWED_ORIGIN_PATTERNS = [
-    "https://canvassync.app",
-    "https://www.canvassync.app",
-]
+_DEFAULT_ALLOWED_ORIGIN_PATTERNS = []
 # Preview deploys: set CORS_ALLOWED_ORIGIN_PATTERNS=https://your-project-*.vercel.app in production if needed.
 if not os.getenv("K_SERVICE"):
     _DEFAULT_ALLOWED_ORIGIN_PATTERNS.append("https://*.vercel.app")
@@ -259,12 +252,7 @@ def _env_truthy(name: str, default: bool = False) -> bool:
 
 
 # Default False in production; require explicit opt-in to avoid accidental exposure
-ENABLE_CLOUD_COST_AUDIT_ENDPOINT = _env_truthy("ENABLE_CLOUD_COST_AUDIT_ENDPOINT", default=not IS_PRODUCTION)
-CLOUD_COST_ALLOWED_EMAILS = {email.lower() for email in _split_csv_env("CLOUD_COST_ALLOWED_EMAILS")}
-
-ENABLE_AI_USAGE_LOGS_DASHBOARD = _env_truthy("ENABLE_AI_USAGE_LOGS_DASHBOARD", default=False)
 ENABLE_DEMO_SESSION = _env_truthy("ENABLE_DEMO_SESSION", default=not IS_PRODUCTION)
-AI_USAGE_LOGS_ALLOWED_EMAILS = {email.lower() for email in _split_csv_env("AI_USAGE_LOGS_ALLOWED_EMAILS")}
 
 try:
     CANVAS_PAGINATION_MAX_PAGES = int(os.getenv("CANVAS_PAGINATION_MAX_PAGES", "50"))
@@ -890,7 +878,14 @@ def discovered_matches_canvas(
 
 
 def canvas_headers(token):
-    return {"Authorization": f"Bearer {token}"}
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json+canvas-string-ids",
+        "User-Agent": os.getenv(
+            "CANVASSYNC_USER_AGENT",
+            "CanvasSync/1.0 (Georgia Tech student-built app; canvassync@gatech.edu)",
+        ),
+    }
 
 
 def canvas_assignment_is_completed(canvas_assignment: dict) -> bool:
@@ -1015,156 +1010,6 @@ def make_course_storage_dir(course_id: str, user_id: str = None, canvas_credenti
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def persist_ai_usage_log(
-    user_id: str,
-    usage_payload: dict,
-    *,
-    course_id: str = None,
-    canvas_credential_key: str = None,
-):
-    """
-    Persist AI token/cost usage logs in a backend-only store.
-    """
-    if not usage_payload or not isinstance(usage_payload, dict):
-        return
-
-    payload = dict(usage_payload)
-    if course_id and not payload.get("course_id"):
-        payload["course_id"] = str(course_id)
-
-    if CLOUD_MODE:
-        try:
-            save_ai_usage_log(user_id, payload, canvas_credential_key)
-        except Exception as e:
-            logger.warning("Failed to persist Firestore AI usage log: %s", e)
-        return
-
-    # Local mode: SQLite
-    conn = None
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO ai_usage_logs (
-                user_id, course_id, request_id, operation, model,
-                input_tokens, output_tokens, total_tokens, cached_tokens,
-                estimated_cost_usd, currency, pricing_source, status,
-                prompt_chars, is_resync, raw_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            str(user_id),
-            str(payload.get("course_id") or ""),
-            str(payload.get("request_id") or ""),
-            str(payload.get("operation") or ""),
-            str(payload.get("model") or ""),
-            int(payload.get("input_tokens") or 0),
-            int(payload.get("output_tokens") or 0),
-            int(payload.get("total_tokens") or 0),
-            int(payload.get("cached_tokens") or 0),
-            float(payload.get("estimated_cost_usd") or 0.0),
-            str(payload.get("currency") or "USD"),
-            str(payload.get("pricing_source") or "unconfigured"),
-            str(payload.get("status") or "ok"),
-            int(payload.get("prompt_chars") or 0),
-            1 if bool(payload.get("is_resync")) else 0 if payload.get("is_resync") is not None else None,
-            json.dumps(payload, ensure_ascii=True),
-            now_iso(),
-        ))
-        conn.commit()
-    except Exception as e:
-        logger.warning("Failed to persist SQLite AI usage log: %s", e)
-    finally:
-        if conn:
-            conn.close()
-
-
-def fetch_ai_usage_logs_for_user(
-    user_id: str,
-    *,
-    limit: int = 50,
-    course_id: str = None,
-    canvas_credential_key: str = None,
-):
-    """
-    Read AI usage logs from backend storage.
-    """
-    try:
-        limit_int = int(limit or 50)
-    except (TypeError, ValueError):
-        limit_int = 50
-    limit_int = max(1, min(limit_int, 200))
-
-    if CLOUD_MODE:
-        try:
-            return get_ai_usage_logs(
-                user_id,
-                limit=limit_int,
-                course_id=course_id,
-                canvas_credential_key=canvas_credential_key,
-            )
-        except Exception as e:
-            logger.warning("Failed to fetch Firestore AI usage logs: %s", e)
-            return []
-
-    # Local mode: SQLite
-    conn = None
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-        params = [str(user_id)]
-        where = "WHERE user_id = ?"
-        if course_id is not None and str(course_id).strip():
-            where += " AND course_id = ?"
-            params.append(str(course_id).strip())
-
-        cur.execute(f"""
-            SELECT id, course_id, request_id, operation, model,
-                   input_tokens, output_tokens, total_tokens, cached_tokens,
-                   estimated_cost_usd, currency, pricing_source, status,
-                   prompt_chars, is_resync, raw_json, created_at
-            FROM ai_usage_logs
-            {where}
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (*params, limit_int))
-
-        rows = []
-        for row in cur.fetchall():
-            raw = {}
-            raw_json = row["raw_json"]
-            if raw_json:
-                try:
-                    raw = json.loads(raw_json)
-                except Exception:
-                    raw = {}
-            rows.append({
-                "id": row["id"],
-                "courseId": row["course_id"],
-                "requestId": row["request_id"],
-                "operation": row["operation"],
-                "model": row["model"],
-                "inputTokens": int(row["input_tokens"] or 0),
-                "outputTokens": int(row["output_tokens"] or 0),
-                "totalTokens": int(row["total_tokens"] or 0),
-                "cachedTokens": int(row["cached_tokens"] or 0),
-                "estimatedCostUsd": float(row["estimated_cost_usd"] or 0.0),
-                "currency": row["currency"] or "USD",
-                "pricingSource": row["pricing_source"] or "unconfigured",
-                "status": row["status"] or "ok",
-                "promptChars": int(row["prompt_chars"] or 0),
-                "isResync": bool(row["is_resync"]) if row["is_resync"] is not None else None,
-                "createdAt": row["created_at"],
-                "raw": raw,
-            })
-        return rows
-    except Exception as e:
-        logger.warning("Failed to fetch SQLite AI usage logs: %s", e)
-        return []
-    finally:
-        if conn:
-            conn.close()
 
 
 def is_allowed_canvas_hostname(hostname: str) -> bool:
@@ -1373,12 +1218,7 @@ def canvas_get_paginated_list(
             timeout=timeout or CANVAS_REQUEST_TIMEOUT_SECONDS,
         )
         if resp.status_code != 200:
-            body_hint = ""
-            try:
-                body_hint = f" — {resp.text[:200]}"
-            except Exception:
-                pass
-            raise RuntimeError(f"Canvas API failed: {resp.status_code} for {next_url}{body_hint}")
+            raise RuntimeError(f"Canvas API failed: {resp.status_code}")
         data = resp.json()
         if isinstance(data, list):
             results.extend(data)
@@ -1390,9 +1230,8 @@ def canvas_get_paginated_list(
 
     if next_url:
         logger.warning(
-            "Canvas pagination truncated at %s pages for %s (increase CANVAS_PAGINATION_MAX_PAGES)",
+            "Canvas pagination truncated at %s pages (increase CANVAS_PAGINATION_MAX_PAGES)",
             max_pages,
-            url,
         )
 
     return results
@@ -1788,7 +1627,7 @@ def get_user_bootstrap():
         try:
             safe_base_url = normalize_canvas_base_url(raw_base_url)
         except ValueError as exc:
-            logger.warning("Stored Canvas base URL is invalid for user %s: %s", user_id, exc)
+            logger.warning("Stored Canvas base URL is invalid: %s", type(exc).__name__)
             safe_base_url = None
 
     has_credentials = bool(active_credential_key and safe_base_url)
@@ -1961,327 +1800,6 @@ def get_user_assignments_api():
     })
 
 
-@app.route("/api/ai/usage-logs", methods=["GET"])
-@require_auth
-def get_ai_usage_logs_api():
-    """
-    Return recent AI token/cost logs from backend storage.
-    """
-    user_id = request.user_id
-
-    try:
-        limit = int((request.args.get("limit") or "50").strip())
-    except ValueError:
-        limit = 50
-    limit = max(1, min(limit, 200))
-
-    course_id = (request.args.get("course_id") or "").strip() or None
-    active_credential_key = None
-
-    if CLOUD_MODE:
-        creds = get_user_canvas_credentials(user_id)
-        active_credential_key = creds.get("canvas_credential_key") if creds else None
-        if getattr(request, "is_demo", False):
-            from demo_service import DEMO_CREDENTIAL_KEY
-            active_credential_key = DEMO_CREDENTIAL_KEY
-
-    logs = fetch_ai_usage_logs_for_user(
-        user_id,
-        limit=limit,
-        course_id=course_id,
-        canvas_credential_key=active_credential_key,
-    )
-
-    total_input_tokens = sum(int(item.get("inputTokens") or 0) for item in logs)
-    total_output_tokens = sum(int(item.get("outputTokens") or 0) for item in logs)
-    total_tokens = sum(int(item.get("totalTokens") or 0) for item in logs)
-    total_estimated_cost = round(sum(float(item.get("estimatedCostUsd") or 0.0) for item in logs), 10)
-
-    return jsonify({
-        "logs": logs,
-        "count": len(logs),
-        "total_input_tokens": total_input_tokens,
-        "total_output_tokens": total_output_tokens,
-        "total_tokens": total_tokens,
-        "total_estimated_cost_usd": total_estimated_cost,
-        "canvas_credential_key": active_credential_key,
-    })
-
-
-@app.route("/api/admin/retention/run", methods=["POST"])
-@limiter.limit("12/hour")
-def run_retention_endpoint():
-    """
-    Cron-triggered retention enforcement. Authenticated by a shared secret in
-    the X-Retention-Secret header (set RETENTION_CRON_SECRET). Disabled when no
-    secret is configured. Prefer a scheduled Cloud Run Job in production.
-    """
-    if not CLOUD_MODE or not RETENTION_CRON_SECRET:
-        return jsonify({"error": "Not found"}), 404
-
-    import hmac
-    provided = request.headers.get("X-Retention-Secret") or ""
-    if not hmac.compare_digest(provided, RETENTION_CRON_SECRET):
-        return jsonify({"error": "Unauthorized"}), 401
-
-    try:
-        from retention_service import run_retention
-        results = run_retention()
-        return jsonify({"status": "ok", "deleted": results})
-    except Exception as exc:
-        logger.error("Retention run failed: %s", exc)
-        return jsonify({"error": "Retention run failed"}), 500
-
-
-def _summarize_ai_usage_logs(logs: list) -> dict:
-    count = len(logs or [])
-    if count <= 0:
-        return {
-            "count": 0,
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_tokens": 0,
-            "total_estimated_cost_usd": 0.0,
-            "avg_input_tokens": 0.0,
-            "avg_output_tokens": 0.0,
-            "avg_total_tokens": 0.0,
-            "avg_estimated_cost_usd": 0.0,
-        }
-
-    total_input = sum(int(item.get("inputTokens") or 0) for item in logs)
-    total_output = sum(int(item.get("outputTokens") or 0) for item in logs)
-    total_tokens = sum(int(item.get("totalTokens") or 0) for item in logs)
-    total_cost = sum(float(item.get("estimatedCostUsd") or 0.0) for item in logs)
-
-    return {
-        "count": count,
-        "total_input_tokens": total_input,
-        "total_output_tokens": total_output,
-        "total_tokens": total_tokens,
-        "total_estimated_cost_usd": round(total_cost, 10),
-        "avg_input_tokens": round(total_input / count, 2),
-        "avg_output_tokens": round(total_output / count, 2),
-        "avg_total_tokens": round(total_tokens / count, 2),
-        "avg_estimated_cost_usd": round(total_cost / count, 10),
-    }
-
-
-@app.route("/api/ai/usage-logs/dashboard", methods=["GET"])
-@require_auth
-def get_ai_usage_logs_dashboard_api():
-    """
-    Admin-only dashboard for AI token/cost logs across all users.
-    """
-    if not ENABLE_AI_USAGE_LOGS_DASHBOARD:
-        return jsonify({"error": "AI usage logs dashboard is disabled."}), 404
-
-    if IS_PRODUCTION and not AI_USAGE_LOGS_ALLOWED_EMAILS:
-        return jsonify({
-            "error": "AI usage logs dashboard access is not configured. Set AI_USAGE_LOGS_ALLOWED_EMAILS.",
-        }), 403
-
-    if AI_USAGE_LOGS_ALLOWED_EMAILS:
-        request_email = str(getattr(request, "user_email", "") or "").strip().lower()
-        if request_email not in AI_USAGE_LOGS_ALLOWED_EMAILS:
-            return jsonify({"error": "Not allowed to access AI usage logs dashboard."}), 403
-
-    try:
-        limit = int((request.args.get("limit") or "100").strip())
-    except ValueError:
-        limit = 100
-    limit = max(1, min(limit, 500))
-
-    model_filter = (request.args.get("model") or "").strip() or None
-
-    if CLOUD_MODE:
-        try:
-            logs = get_all_ai_usage_logs(limit=limit, model_filter=model_filter)
-        except Exception as exc:
-            logger.exception("Failed to fetch AI usage dashboard logs: %s", exc)
-            return jsonify({"error": "Failed to load AI usage logs"}), 500
-    else:
-        conn = None
-        logs = []
-        try:
-            conn = get_db()
-            cur = conn.cursor()
-            model_needle = (model_filter or "").strip().lower()
-            cur.execute("""
-                SELECT id, user_id, course_id, request_id, operation, model,
-                       input_tokens, output_tokens, total_tokens, cached_tokens,
-                       estimated_cost_usd, currency, pricing_source, status,
-                       prompt_chars, is_resync, raw_json, created_at
-                FROM ai_usage_logs
-                ORDER BY created_at DESC
-                LIMIT ?
-            """, (limit * 4 if model_needle else limit,))
-            for row in cur.fetchall():
-                model_name = str(row["model"] or "").lower()
-                if model_needle and model_needle not in model_name:
-                    continue
-                raw = {}
-                if row["raw_json"]:
-                    try:
-                        raw = json.loads(row["raw_json"])
-                    except Exception:
-                        raw = {}
-                logs.append({
-                    "id": row["id"],
-                    "userId": str(row["user_id"] or ""),
-                    "courseId": row["course_id"],
-                    "requestId": row["request_id"],
-                    "operation": row["operation"],
-                    "model": row["model"],
-                    "llmProvider": raw.get("gen_ai.system") or raw.get("llm_provider"),
-                    "inputTokens": int(row["input_tokens"] or 0),
-                    "outputTokens": int(row["output_tokens"] or 0),
-                    "totalTokens": int(row["total_tokens"] or 0),
-                    "cachedTokens": int(row["cached_tokens"] or 0),
-                    "estimatedCostUsd": float(row["estimated_cost_usd"] or 0.0),
-                    "currency": row["currency"] or "USD",
-                    "pricingSource": row["pricing_source"] or "unconfigured",
-                    "status": row["status"] or "ok",
-                    "promptChars": int(row["prompt_chars"] or 0),
-                    "isResync": bool(row["is_resync"]) if row["is_resync"] is not None else None,
-                    "createdAt": row["created_at"],
-                    "promptText": raw.get("prompt_text") or "",
-                    "responseText": raw.get("response_text") or "",
-                    "errorType": raw.get("error_type"),
-                    "errorMessage": raw.get("error_message"),
-                    "raw": raw,
-                })
-                if len(logs) >= limit:
-                    break
-        except Exception as exc:
-            logger.warning("Failed to fetch SQLite AI dashboard logs: %s", exc)
-        finally:
-            if conn:
-                conn.close()
-
-    summary = _summarize_ai_usage_logs(logs)
-    return jsonify({
-        **summary,
-        "model_filter": model_filter,
-        "logs": logs,
-    })
-
-
-@app.route("/api/cloud/cost-audit", methods=["GET"])
-@require_auth
-def get_cloud_cost_audit_api():
-    """
-    Return Cloud Run + Artifact Registry spend from BigQuery Billing Export.
-    """
-    if not ENABLE_CLOUD_COST_AUDIT_ENDPOINT:
-        return jsonify({"error": "Cloud cost audit endpoint is disabled."}), 404
-
-    # Deny by default: require explicit allowlist when endpoint is enabled.
-    if not CLOUD_COST_ALLOWED_EMAILS:
-        return jsonify({"error": "Cloud cost audit access is not configured. Set CLOUD_COST_ALLOWED_EMAILS."}), 403
-    request_email = str(getattr(request, "user_email", "") or "").strip().lower()
-    if request_email not in CLOUD_COST_ALLOWED_EMAILS:
-        return jsonify({"error": "Not allowed to access cloud cost audit data."}), 403
-
-    try:
-        days = int((request.args.get("days") or "7").strip())
-    except ValueError:
-        return jsonify({"error": "days must be an integer."}), 400
-    days = max(1, min(days, 120))
-
-    granularity = str(request.args.get("granularity") or "day").strip().lower()
-    if granularity not in {"hour", "day"}:
-        return jsonify({"error": "granularity must be 'hour' or 'day'."}), 400
-
-    try:
-        limit = int((request.args.get("limit") or "300").strip())
-    except ValueError:
-        return jsonify({"error": "limit must be an integer."}), 400
-    limit = max(10, min(limit, 2000))
-
-    project_filter = (request.args.get("project_id") or "").strip() or None
-    cloud_run_service = (request.args.get("cloud_run_service") or "").strip() or None
-    artifact_repository = (request.args.get("artifact_repository") or "").strip() or None
-
-    try:
-        from cloud_cost_audit import (
-            CostAuditConfigError,
-            CostAuditQueryError,
-            fetch_cloud_cost_snapshot,
-        )
-        payload = fetch_cloud_cost_snapshot(
-            days=days,
-            granularity=granularity,
-            detail_limit=limit,
-            project_filter=project_filter,
-            cloud_run_service=cloud_run_service,
-            artifact_repository=artifact_repository,
-        )
-        return jsonify(payload)
-    except CostAuditConfigError:
-        return jsonify({"error": "Cloud cost audit is not properly configured.", "code": "COST_AUDIT_CONFIG"}), 400
-    except CostAuditQueryError:
-        return jsonify({"error": "Cloud cost audit query failed.", "code": "COST_AUDIT_QUERY"}), 502
-    except Exception as exc:
-        logger.error("Unexpected cloud cost audit failure: %s", exc)
-        return jsonify({"error": "Unexpected failure in cloud cost audit endpoint."}), 500
-
-
-@app.route("/api/user/canvas-credentials", methods=["POST"])
-@limiter.limit("10/minute")
-@require_auth
-def save_canvas_credentials():
-    """Save Canvas credentials to Firestore for this user.
-    Ties the Canvas token to the user's Google account."""
-    if CLOUD_MODE:
-        return jsonify({
-            "error": "Manual Canvas tokens are disabled. Sign in with Canvas OAuth.",
-        }), 403
-
-    payload = request.get_json(silent=True) or {}
-    base_url_raw = str(payload.get("base_url") or "").strip()
-    token = str(payload.get("token") or "").strip()
-    
-    if not base_url_raw or not token:
-        return jsonify({"error": "Missing base_url or token"}), 400
-
-    try:
-        base_url = normalize_canvas_base_url(base_url_raw)
-    except ValueError as exc:
-        return jsonify({"error": f"Invalid base_url: {exc}"}), 400
-    
-    if CLOUD_MODE:
-        # Store in Firestore (token encryption handled in db layer).
-        try:
-            credential_key = update_user_canvas_credentials(request.user_id, base_url, token)
-        except RuntimeError as exc:
-            logger.error("Failed to store Canvas credentials securely: %s", exc)
-            return jsonify({"error": "Server encryption is not configured"}), 500
-        return jsonify({"success": True, "canvas_credential_key": credential_key})
-    else:
-        # Local mode - no persistence
-        return jsonify({"success": True, "note": "Local mode, not persisted"})
-
-
-@app.route("/api/user/canvas-credentials", methods=["GET"])
-@require_auth
-def get_canvas_credentials():
-    """Get Canvas credentials from Firestore for this user."""
-    if CLOUD_MODE:
-        creds = get_user_canvas_credentials(request.user_id)
-        if creds and creds.get('api_url'):
-            try:
-                safe_base_url = normalize_canvas_base_url(creds['api_url'])
-            except ValueError as exc:
-                logger.warning("Stored Canvas base URL is invalid for user %s: %s", request.user_id, exc)
-                return jsonify({"has_credentials": False})
-            return jsonify({
-                "base_url": safe_base_url,
-                "canvas_credential_key": creds.get('canvas_credential_key'),
-                "has_credentials": True
-            })
-    return jsonify({"has_credentials": False})
-
-
 @app.route("/api/user/preferences", methods=["GET"])
 @require_auth
 def get_user_preferences_api():
@@ -2337,15 +1855,22 @@ def record_legal_consent_api():
     if not payload.get("accepted"):
         return jsonify({"error": "Consent must be accepted to continue."}), 400
 
-    from db_supabase import record_user_legal_consent
+    from db_supabase import LEGAL_CONSENT_VERSION, record_user_legal_consent
+
+    submitted_version = str(payload.get("version") or "").strip()
+    if submitted_version and submitted_version != LEGAL_CONSENT_VERSION:
+        return jsonify({
+            "error": "The Terms or Privacy Policy changed. Refresh and review the current disclosure.",
+            "required_version": LEGAL_CONSENT_VERSION,
+        }), 409
 
     try:
         record = record_user_legal_consent(
             request.user_id,
-            version=str(payload.get("version") or "").strip() or None,
+            version=LEGAL_CONSENT_VERSION,
         )
     except Exception as exc:
-        logger.exception("legal-consent failed for user %s: %s", request.user_id, exc)
+        logger.exception("Legal-consent persistence failed")
         message = "Failed to record consent."
         if not IS_PRODUCTION:
             message = (
@@ -2379,10 +1904,12 @@ def delete_user_data_api():
     try:
         delete_all_user_data(user_id)
     except Exception as exc:
-        logger.exception("delete-data failed for user %s: %s", user_id, exc)
+        logger.exception("User-data deletion failed")
         return jsonify({"error": "Failed to delete user data."}), 500
 
-    return jsonify({"message": "All user data deleted."})
+    response = jsonify({"message": "All user data deleted."})
+    clear_session_cookie(response)
+    return response
 
 
 @app.route("/api/user/export", methods=["GET"])
@@ -2401,7 +1928,7 @@ def export_user_data_api():
         from db_supabase import export_all_user_data
         data = export_all_user_data(user_id)
     except Exception as exc:
-        logger.exception("export failed for user %s: %s", user_id, exc)
+        logger.exception("User-data export failed")
         return jsonify({"error": "Failed to export user data."}), 500
 
     resp = jsonify(data)
@@ -2429,7 +1956,7 @@ def disconnect_canvas_api():
         from canvas_token_service import revoke_canvas_tokens
         revoke_canvas_tokens(user_id)
     except Exception as exc:
-        logger.exception("disconnect-canvas failed for user %s: %s", user_id, exc)
+        logger.exception("Canvas disconnect failed")
         return jsonify({"error": "Failed to disconnect Canvas."}), 500
 
     return jsonify({"message": "Canvas disconnected. Stored credentials cleared."})
@@ -2438,46 +1965,6 @@ def disconnect_canvas_api():
 # =============================================================================
 # CANVAS PASSTHROUGH APIs
 # =============================================================================
-
-@app.route("/api/canvas/test", methods=["POST"])
-@limiter.limit("30/minute")
-@require_auth
-@require_consent
-def test_canvas():
-    payload = request.get_json(silent=True) or {}
-    if CLOUD_MODE:
-        if str(payload.get("token") or "").strip():
-            return jsonify({
-                "valid": False,
-                "error": "Manual Canvas tokens are disabled. Sign in with Canvas OAuth.",
-            }), 403
-        base_url, token, active_credential_key, error = resolve_canvas_credentials(request.user_id, payload)
-        if error:
-            return jsonify({"valid": False, "error": error}), 400
-    else:
-        base_url_raw = str(payload.get("base_url") or "").strip()
-        token = str(payload.get("token") or "").strip()
-        if not base_url_raw or not token:
-            return jsonify({"valid": False, "error": "Missing base_url or token"}), 400
-        try:
-            base_url = normalize_canvas_base_url(base_url_raw)
-        except ValueError as exc:
-            return jsonify({"valid": False, "error": f"Invalid base_url: {exc}"}), 400
-
-    try:
-        r = requests.get(
-            f"{base_url}/api/v1/courses",
-            headers=canvas_headers(token),
-            params={"per_page": 1},
-            timeout=CANVAS_REQUEST_TIMEOUT_SECONDS,
-        )
-        return jsonify({
-            "valid": r.status_code == 200,
-            "status": r.status_code
-        })
-    except Exception as e:
-        return jsonify({"valid": False, "error": str(e)}), 500
-
 
 @app.route("/api/canvas/courses", methods=["POST"])
 @require_auth
@@ -2528,16 +2015,11 @@ def canvas_courses():
 
     for r in (active_res, invited_res, completed_res):
         if r.status_code != 200:
-            # Do not echo upstream Canvas response bodies to clients in
-            # production (may contain identifiers / internal detail). See R4/F13.
             error_body = {
                 "error": "Failed to fetch courses from Canvas",
                 "status": r.status_code,
             }
-            if not IS_PRODUCTION:
-                error_body["details"] = r.text[:500] if getattr(r, "text", None) else None
-            else:
-                logger.warning("Canvas courses fetch failed: HTTP %s", r.status_code)
+            logger.warning("Canvas courses fetch failed: HTTP %s", r.status_code)
             return jsonify(error_body), 400
 
     courses_by_id = {}
@@ -2846,7 +2328,7 @@ def sync_assignments():
         )
     except Exception as e:
         err_str = str(e)
-        logger.warning("Canvas API request failed for course %s: %s", course_id, err_str)
+        logger.warning("Canvas assignment request failed: %s", type(e).__name__)
         status_code = 502
         detail = "Error communicating with Canvas API."
         if "401" in err_str:
@@ -2856,7 +2338,7 @@ def sync_assignments():
             detail = "Canvas denied access to this course (403 Forbidden). Check enrollment or token permissions."
             status_code = 403
         elif "404" in err_str:
-            detail = f"Canvas course {course_id} not found (404). It may have been deleted or unpublished."
+            detail = "Canvas course not found (404). It may have been deleted or unpublished."
             status_code = 404
         elif "429" in err_str:
             detail = "Canvas rate limit reached (429). Wait a moment and try again."
@@ -3322,13 +2804,11 @@ def sync_course_materials():
             for ft in file_types_to_version:
                 previous_files.extend(archive_course_file_texts(user_id, course_id, ft, active_credential_key))
             sync_version = increment_course_sync_version(user_id, course_id, active_credential_key)
-            print(f"[RESYNC] Archived {len(previous_files)} previous files (sync v{sync_version})")
+            logger.info("Archived %s previous course-material rows for resync", len(previous_files))
         else:
             sync_version = increment_course_sync_version(user_id, course_id, active_credential_key)
 
-    print(f"\n{'=' * 60}")
-    print(f"[SYNC] {'RE' if is_resync else ''}SYNCING COURSE MATERIALS: {course_id} (v{sync_version})")
-    print(f"{'=' * 60}\n")
+    logger.info("Starting %scourse-material sync", "re" if is_resync else "")
 
     # STEP 1: Fetch Front Page
     print("[SYNC 1/6] Fetching front page...")
@@ -3355,7 +2835,7 @@ def sync_course_materials():
                         "text": text,
                         "metadata": {"page_id": page_data.get("page_id"), "source": "front_page"}
                     })
-                    print(f"   [OK] Extracted front page: {title} ({len(text)} chars)")
+                    logger.info("Extracted front-page text (%s chars)", len(text))
 
                 links = extract_links_from_html(body_html, base_url, include_all_files=True)
                 for link in links:
@@ -3381,7 +2861,7 @@ def sync_course_materials():
         else:
             print(f"   [WARN] Front page not available (status {front_page_response.status_code})")
     except Exception as e:
-        print(f"   [ERROR] Error fetching front page: {e}")
+        logger.warning("Front-page fetch failed: %s", type(e).__name__)
 
     # STEP 2: Fetch Syllabus Body
     print("\n[SYNC 2/6] Fetching syllabus from course...")
@@ -3434,7 +2914,7 @@ def sync_course_materials():
         else:
             print(f"   [WARN] Syllabus fetch failed (status {syllabus_response.status_code})")
     except Exception as e:
-        print(f"   [ERROR] Error fetching syllabus: {e}")
+        logger.warning("Syllabus fetch failed: %s", type(e).__name__)
 
     # STEP 3: List Files from Files Section
     print("\n[SYNC 3/6] Listing files from Files section...")
@@ -3467,9 +2947,9 @@ def sync_course_materials():
         if "Canvas API failed: 403" in str(e):
             print("   [WARN] Files section forbidden (403)")
         else:
-            print(f"   [WARN] Files section fetch failed: {e}")
+            logger.warning("Canvas files listing failed: %s", type(e).__name__)
     except Exception as e:
-        print(f"   [ERROR] Error listing files: {e}")
+        logger.warning("Canvas files listing failed: %s", type(e).__name__)
 
     # STEP 4: List Files from Modules (abbreviated for brevity)
     print("\n[SYNC 4/6] Scanning modules...")
@@ -3616,9 +3096,9 @@ def sync_course_materials():
         if "Canvas API failed: 403" in str(e):
             print("   [WARN] Modules section forbidden (403)")
         else:
-            print(f"   [WARN] Modules fetch failed: {e}")
+            logger.warning("Canvas modules listing failed: %s", type(e).__name__)
     except Exception as e:
-        print(f"   [ERROR] Error scanning modules: {e}")
+        logger.warning("Canvas modules scan failed: %s", type(e).__name__)
 
     original_download_target_count = len(files_to_download)
     files_to_download = dedupe_download_targets(files_to_download)
@@ -3642,7 +3122,7 @@ def sync_course_materials():
         is_google_doc = file_info.get("is_google_doc", False)
 
         if is_google_sheet:
-            print(f"   [INFO] Fetching Google Sheet: {display_name}")
+            logger.info("Fetching linked Google Sheet")
             text = fetch_google_sheet_as_text(url)
             if text and len(text.strip()) > 50:
                 extracted_materials.append({
@@ -3656,7 +3136,7 @@ def sync_course_materials():
             continue
 
         if is_google_doc:
-            print(f"   Fetching Google Doc: {display_name}")
+            logger.info("Fetching linked Google Doc")
             text = fetch_google_doc_as_text(url)
             if text and len(text.strip()) > 50:
                 extracted_materials.append({
@@ -3680,7 +3160,7 @@ def sync_course_materials():
             continue
 
         if not is_canvas_origin_url(url, base_url):
-            print(f"   Skipping non-Canvas file URL for safety: {display_name}")
+            logger.warning("Skipped a non-Canvas file URL")
             continue
 
         if not os.path.exists(local_path):
@@ -3697,11 +3177,11 @@ def sync_course_materials():
                         for chunk in resp.iter_content(chunk_size=8192):
                             if chunk:
                                 out.write(chunk)
-                    print(f"   [OK] Downloaded: {display_name}")
+                    logger.info("Downloaded one Canvas course file")
                 else:
                     continue
             except Exception as e:
-                print(f"   [ERROR] Error downloading {display_name}: {e}")
+                logger.warning("Canvas file download failed: %s", type(e).__name__)
                 continue
 
         try:
@@ -3716,7 +3196,7 @@ def sync_course_materials():
                     "metadata": {"file_id": file_id if isinstance(file_id, int) else None, "path": local_path}
                 })
         except Exception as e:
-            print(f"   [ERROR] Extraction failed for {display_name}: {e}")
+            logger.warning("Course file extraction failed: %s", type(e).__name__)
 
     deduped_materials = []
     seen_material_keys = set()
@@ -3822,9 +3302,7 @@ def sync_course_materials():
         ]
     }
 
-    print(f"\n{'=' * 60}")
-    print(f"[OK] {'RE' if is_resync else ''}SYNC COMPLETE (v{sync_version})")
-    print(f"{'=' * 60}\n")
+    logger.info("Course-material sync complete; extracted %s material rows", len(extracted_materials))
 
     return jsonify(summary)
 
@@ -4272,7 +3750,7 @@ def _apply_cloud_group_ai_results(
 
             if not due:
                 if category == "EXAM":
-                    print(f"   [WARN] Keeping exam without date: {name}")
+                    logger.info("AI returned an exam without a date")
                 else:
                     continue
 
@@ -4282,11 +3760,11 @@ def _apply_cloud_group_ai_results(
 
             if is_resync and action:
                 if action == "KEEP":
-                    print(f"   [KEEP] {category}: {name}")
+                    logger.debug("AI resync kept one %s item", category)
                 elif action == "UPDATE":
-                    print(f"   [UPDATE] {category}: {name} - {r.get('reason', '')}")
+                    logger.debug("AI resync updated one %s item", category)
                 elif action == "ADD":
-                    print(f"   + Adding {category}: {name}")
+                    logger.debug("AI resync added one %s item", category)
 
             for scoped_course_id in target_course_ids_for_discovered:
                 scoped_course_id = str(scoped_course_id)
@@ -4310,7 +3788,7 @@ def _apply_cloud_group_ai_results(
                         scoped_course_key_map.pop(discovered_key, None)
                     suppressed_discovered_against_canvas += 1
                     if is_resync:
-                        print(f"   [SKIP DUP-CANVAS] {category}: {name}")
+                        logger.debug("AI resync suppressed one Canvas duplicate")
                     continue
 
                 if existing_for_key:
@@ -4325,7 +3803,7 @@ def _apply_cloud_group_ai_results(
                     "name": name_to_store,
                     "description": desc or "Discovered from schedule",
                     "normalized_due_at": due,
-                    "source_of_truth": "Schedule!",
+                    "source_of_truth": "AI-generated from course materials",
                     "status": "DISCOVERED",
                     "category": category,
                     "deliverable": deliverable,
@@ -4358,13 +3836,11 @@ def _apply_cloud_group_ai_results(
                 discovered_count += 1
 
             if not is_resync or action == "ADD":
-                if len(target_course_ids_for_discovered) > 1:
-                    print(
-                        f"   [DISCOVERED] {category}: {name} due {due} "
-                        f"(applied to {len(target_course_ids_for_discovered)} courses)"
-                    )
-                else:
-                    print(f"   [DISCOVERED] {category}: {name} due {due}")
+                logger.debug(
+                    "AI discovered one %s item for %s course shell(s)",
+                    category,
+                    len(target_course_ids_for_discovered),
+                )
 
     removed_discovered_duplicates = 0
     for scoped_course_id, stale_ids in stale_discovered_doc_ids_by_course.items():
@@ -4376,7 +3852,7 @@ def _apply_cloud_group_ai_results(
                 user_id, stale_list, active_credential_key,
             )
         except Exception as cleanup_err:
-            print(f"[WARN] Failed dedupe cleanup for course {scoped_course_id}: {cleanup_err}")
+            logger.warning("Discovered-item dedupe cleanup failed: %s", type(cleanup_err).__name__)
     if removed_discovered_duplicates > 0:
         print(f"[DEDUPE] Removed {removed_discovered_duplicates} stale discovered duplicate(s)")
 
@@ -4492,7 +3968,7 @@ def _apply_local_course_ai_results(course_id, ai_resp, ctx, discover_new):
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         course_id, None, name, desc or "Discovered from schedule",
-                        None, due, "Schedule!", None, "DISCOVERED", raw_meta,
+                        None, due, "AI-generated from course materials", None, "DISCOVERED", raw_meta,
                         category, deliverable, now_iso(), now_iso(),
                     ))
             else:
@@ -4505,7 +3981,7 @@ def _apply_local_course_ai_results(course_id, ai_resp, ctx, discover_new):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     course_id, None, name, desc or "Discovered from schedule",
-                    None, due, "Schedule!", None, "DISCOVERED", raw_meta,
+                    None, due, "AI-generated from course materials", None, "DISCOVERED", raw_meta,
                     category, deliverable, now_iso(), now_iso(),
                 ))
             discovered_count += 1
@@ -4537,6 +4013,11 @@ def resolve_course_dates():
     user_id = request.user_id
     if not course_id:
         return jsonify({"error": "Missing course_id"}), 400
+    if not ENABLE_AI_RESOLVE and not is_demo_user(user_id, getattr(request, "is_demo", False)):
+        return jsonify({
+            "error": "AI date resolution is temporarily disabled pending direct DeepInfra configuration.",
+            "code": "AI_DISABLED",
+        }), 503
 
     if CLOUD_MODE and not is_demo_user(user_id, getattr(request, "is_demo", False)):
         from db_supabase import user_has_legal_consent
@@ -4573,7 +4054,7 @@ def resolve_course_dates():
     )
     all_course_ids = list(dict.fromkeys(cid for group in course_groups for cid in group))
 
-    has_llm_key = any((os.getenv(name) or "").strip() for name in ("LLM_API_KEY", "OPENROUTER_API_KEY", "LAMBDA_API_KEY"))
+    has_llm_key = any((os.getenv(name) or "").strip() for name in ("DEEPINFRA_API_KEY", "LLM_API_KEY"))
     if active_credential_key == DEMO_CREDENTIAL_KEY and (not IS_PRODUCTION or not has_llm_key):
         from demo_memory_store import (
             get_course_assignments as demo_get_course_assignments,
@@ -4640,17 +4121,18 @@ def resolve_course_dates():
     )
 
     request_id = str(uuid.uuid4())
-    print(
-        f"[AI PARALLEL] Resolving {len(course_groups)} group(s) "
-        f"({len(all_course_ids)} course(s)) with max_concurrency={AI_MAX_CONCURRENCY}: "
-        f"{course_groups}"
+    logger.info(
+        "Resolving %s AI group(s) across %s course shell(s), max concurrency %s",
+        len(course_groups),
+        len(all_course_ids),
+        AI_MAX_CONCURRENCY,
     )
 
     def _resolve_one_group(group_course_ids):
         group_course_ids = list(dict.fromkeys(str(c).strip() for c in group_course_ids if str(c).strip()))
         group_key = group_course_ids[0]
         if len(group_course_ids) > 1:
-            print(f"[GROUP SYNC] Unified class-code resolve across {len(group_course_ids)} courses: {group_course_ids}")
+            logger.info("Unified AI resolve across %s related course shells", len(group_course_ids))
 
         if active_credential_key == DEMO_CREDENTIAL_KEY:
             ctx = _load_cloud_group_ai_context(user_id, group_course_ids, active_credential_key)
@@ -4661,16 +4143,17 @@ def resolve_course_dates():
 
         is_resync = ctx["is_resync"]
         if is_resync:
-            print(
-                f"[AI RESYNC] group={group_key}: "
-                f"{len(ctx['canvas_assignments'])} Canvas, "
-                f"{len(ctx['existing_discovered'])} existing discovered"
+            logger.info(
+                "AI resync input: %s Canvas assignments, %s existing discovered items",
+                len(ctx["canvas_assignments"]),
+                len(ctx["existing_discovered"]),
             )
         else:
-            print(
-                f"[AI] group={group_key}: resolving "
-                f"{len(ctx['assignments'])} assignments, "
-                f"{len(ctx['files'])} files, {len(ctx['announcements'])} announcements"
+            logger.info(
+                "AI resolve input: %s assignments, %s files, %s announcements",
+                len(ctx["assignments"]),
+                len(ctx["files"]),
+                len(ctx["announcements"]),
             )
 
         telemetry_context = {
@@ -4710,14 +4193,7 @@ def resolve_course_dates():
         )
 
         if isinstance(ai_resp, dict):
-            usage_payload = ai_resp.pop("_usage", None)
-            if usage_payload and CLOUD_MODE:
-                persist_ai_usage_log(
-                    user_id,
-                    usage_payload,
-                    course_id=group_key,
-                    canvas_credential_key=active_credential_key,
-                )
+            ai_resp.pop("_usage", None)
 
         if active_credential_key == DEMO_CREDENTIAL_KEY:
             stats = _apply_cloud_group_ai_results(
@@ -4745,9 +4221,6 @@ def resolve_course_dates():
                 discover_new,
             )
 
-        if is_resync:
-            print(f"[AI RESYNC] group={group_key} summary: {stats.get('changes_summary', 'N/A')}")
-
         stats["courses"] = [
             {"course_id": cid, "status": "succeeded"} for cid in group_course_ids
         ]
@@ -4763,9 +4236,9 @@ def resolve_course_dates():
         import traceback
         traceback.print_exc()
         err_text = str(e or "")
-        if "LLM_API_KEY is not set" in err_text:
+        if "DEEPINFRA_API_KEY is not set" in err_text:
             return jsonify({
-                "error": "AI is not configured on the server. Set LLM_API_KEY (OpenRouter) on Cloud Run.",
+                "error": "AI is not configured on the server. Set DEEPINFRA_API_KEY on Cloud Run.",
             }), 503
         status_code = 503 if is_transient_ai_error(e) else 500
         error_label = "AI resolve temporarily unavailable" if status_code == 503 else "AI resolve failed"
@@ -4787,9 +4260,9 @@ def resolve_course_dates():
 
     if not succeeded_groups and failed_groups:
         first_err = failed_groups[0].get("error") or "All course groups failed AI resolve"
-        if "LLM_API_KEY is not set" in first_err:
+        if "DEEPINFRA_API_KEY is not set" in first_err:
             return jsonify({
-                "error": "AI is not configured on the server. Set LLM_API_KEY (OpenRouter) on Cloud Run.",
+                "error": "AI is not configured on the server. Set DEEPINFRA_API_KEY on Cloud Run.",
             }), 503
         status_code = 503 if any(
             is_transient_ai_error(Exception(r.get("error") or "")) for r in failed_groups

@@ -24,8 +24,8 @@ these sources into one timeline.
 - **Canvas OAuth2 sign-in** — users connect their own Canvas account via OAuth2;
   access/refresh tokens are encrypted at rest and refreshed automatically.
 - **AI-powered date extraction** — sends relevant course text, after best-effort
-  redaction of obvious identifiers, to an LLM via OpenRouter routed to DeepInfra
-  with ZDR required. Course text is not guaranteed anonymous. Independent course
+  redaction of obvious identifiers, directly to DeepInfra using
+  `Qwen/Qwen3-235B-A22B-Instruct-2507`. Course text is not guaranteed anonymous. Independent course
   groups resolve in parallel (default up to 10 concurrent LLM calls);
   lecture/lab/recitation sections with the same class code share one merged
   resolve pass.
@@ -55,7 +55,7 @@ flowchart LR
     end
 
     subgraph ai [AI]
-        OpenRouter["OpenRouter\n(ZDR routing)"]
+        DeepInfra["DeepInfra\nQwen3-235B-A22B"]
     end
 
     subgraph external [External]
@@ -68,7 +68,7 @@ flowchart LR
     Flask -->|"courses, assignments,\nfiles, announcements"| Canvas
     Flask -->|"read/write user data"| Postgres
     Flask -->|"store/retrieve files"| Storage
-    Flask -->|"date extraction prompts\n(best-effort redaction)"| OpenRouter
+    Flask -->|"date extraction prompts\n(best-effort redaction)"| DeepInfra
 ```
 
 **Request flow:** The React frontend starts the Canvas OAuth2 flow. The Flask
@@ -76,10 +76,10 @@ backend exchanges the authorization code for Canvas tokens, encrypts them
 (Fernet) and stores them in Supabase, then issues its own httpOnly session JWT.
 On each request the backend validates the session, refreshes the Canvas token if
 needed, syncs data from the Canvas REST API into Supabase, and (after the user
-has consented) sends relevant course text to OpenRouter for date extraction.
-OpenRouter routes the request to DeepInfra with ZDR required, data collection
-denied, and provider fallback disabled; best-effort redaction runs before the
-request, but free-text course materials are not guaranteed anonymous.
+has consented) sends relevant course text directly to DeepInfra for date
+extraction. No AI gateway or alternate-provider fallback is configured;
+best-effort redaction runs before the request, but free-text course materials
+are not guaranteed anonymous.
 Multi-course syncs run independent class-code groups in parallel
 (`AI_MAX_CONCURRENCY`, default 10); sections with the same course code (e.g.
 lecture + lab) stay grouped in a single LLM call and results fan out to each
@@ -100,13 +100,12 @@ When resolving deadlines (`POST /api/resolve_course_dates`):
 4. **Partial failure** — a failed group does not abort the sync; successful
    groups persist immediately. The API returns per-group and per-course status.
 
-Provider routing stays locked to DeepInfra via OpenRouter with ZDR required,
-data collection denied, and fallbacks disabled (`OPENROUTER_ALLOW_FALLBACK=false`).
-If the DeepInfra route does not satisfy the ZDR/data-policy constraints, the
-request fails instead of silently using another provider.
+The provider and model are fixed to direct DeepInfra and
+`Qwen/Qwen3-235B-A22B-Instruct-2507`. If that request fails, the app reports the
+failure instead of silently using another provider or model.
 
-Relevant env vars (see `backend/.env.template`): `MODEL_NAME`,
-`OPENROUTER_PROVIDER_ONLY`, `OPENROUTER_ENFORCE_ZDR`, `AI_MAX_CONCURRENCY`,
+Relevant env vars (see `backend/.env.template`): `DEEPINFRA_API_KEY`,
+`LLM_BASE_URL`, `MODEL_NAME`, `AI_MAX_CONCURRENCY`, and
 `AI_TRANSIENT_MAX_RETRIES`.
 
 ## Runtime modes
@@ -126,7 +125,7 @@ Mode is determined by `backend/app_config.py` (the single source of truth):
 | **Frontend** | React 19, Tailwind CSS, Day.js |
 | **Backend** | Python 3.11, Flask 3, Gunicorn, Flask-Limiter |
 | **Database** | Supabase (Postgres + RLS) — cloud; SQLite — local dev |
-| **AI** | OpenRouter → DeepInfra (ZDR-only, no provider fallback) |
+| **AI** | Direct DeepInfra (`Qwen/Qwen3-235B-A22B-Instruct-2507`) |
 | **Storage** | Supabase Storage (local filesystem fallback in dev) |
 | **Auth** | Canvas OAuth2; httpOnly session JWTs; Fernet-encrypted Canvas tokens |
 | **Parsing** | pdfplumber, python-docx, openpyxl, BeautifulSoup |
@@ -147,10 +146,9 @@ canvas-organizer/
 │   ├── sync_throttle.py        # Distributed per-user sync spacing
 │   ├── storage.py              # Supabase Storage / local file storage
 │   ├── ai/
-│   │   ├── llm_model.py              # OpenRouter LLM integration (DeepInfra ZDR route)
+│   │   ├── llm_model.py              # Direct DeepInfra LLM integration
 │   │   ├── parallel_course_resolve.py # Bounded parallel resolve across course groups
-│   │   ├── prompt_sanitizer.py       # Best-effort PII redaction before LLM calls
-│   │   └── usage_telemetry.py        # Token/cost tracking
+│   │   └── prompt_sanitizer.py       # Best-effort PII redaction before LLM calls
 │   ├── parsers/                # PDF/DOCX/file extraction + safe download
 │   ├── migrations/             # SQL + data-repair migrations
 │   ├── requirements.txt
@@ -172,7 +170,7 @@ canvas-organizer/
 ### Prerequisites
 
 - Python 3.11+, Node.js + npm
-- For cloud mode: a Supabase project, an OpenRouter API key, and a Canvas
+- For cloud mode: a Supabase project, a DeepInfra API key, and a Canvas
   Developer Key (OAuth2 client id/secret) for your institution's Canvas instance.
 
 ### Local Development
@@ -235,8 +233,8 @@ See [SECURITY.md](SECURITY.md) and `docs/OIT_READINESS_AUDIT.md`. Key points:
 - **Stable account-scoped data keys** (never derived from rotating tokens).
 - **Consent enforced at ingestion** — Canvas data is not stored until the user
   has accepted the ToS / Privacy / AI disclosure.
-- **AI routing bound to disclosure** — data is only sent to providers listed in
-  `DISCLOSED_AI_PROVIDERS`; best-effort PII redaction runs first.
+- **Direct, disclosed AI route** — data is sent only to DeepInfra using the
+  configured Qwen model; best-effort PII redaction runs first.
 - **Data minimization & retention** — raw Canvas payloads are not persisted in
   production by default; time-based retention purges stored content.
 - **User data controls** — in-app export and full deletion (revokes Canvas

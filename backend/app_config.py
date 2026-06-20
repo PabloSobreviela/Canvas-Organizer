@@ -73,6 +73,11 @@ if IS_PRODUCTION and not CLOUD_MODE:
 STORE_RAW_CANVAS_JSON = _truthy(os.getenv("STORE_RAW_CANVAS_JSON")) if IS_PRODUCTION \
     else _truthy(os.getenv("STORE_RAW_CANVAS_JSON", "true"))
 
+# AI inference can be explicitly disabled while credentials or institutional
+# approval are pending. When enabled, startup validation requires a direct
+# DeepInfra credential.
+ENABLE_AI_RESOLVE = _truthy(os.getenv("ENABLE_AI_RESOLVE", "true"))
+
 
 def _int_env(name: str, default: int) -> int:
     try:
@@ -87,18 +92,12 @@ ANNOUNCEMENT_RETENTION_DAYS = _int_env("ANNOUNCEMENT_RETENTION_DAYS", 180)
 ASSIGNMENT_RETENTION_DAYS = _int_env("ASSIGNMENT_RETENTION_DAYS", 180)
 COURSE_RETENTION_DAYS = _int_env("COURSE_RETENTION_DAYS", 180)
 SYLLABUS_RULES_RETENTION_DAYS = _int_env("SYLLABUS_RULES_RETENTION_DAYS", 180)
-AI_USAGE_LOG_RETENTION_DAYS = _int_env("AI_USAGE_LOG_RETENTION_DAYS", 365)
-# Optional: purge content for users with no login + no sync for this long. 0 = off.
-INACTIVE_USER_CONTENT_PURGE_DAYS = _int_env("INACTIVE_USER_CONTENT_PURGE_DAYS", 0)
-
-# Shared secret for the cron-triggered retention endpoint (if used instead of a
-# scheduled Cloud Run Job). Empty disables the endpoint.
-RETENTION_CRON_SECRET = (os.getenv("RETENTION_CRON_SECRET") or "").strip()
-
+# Purge stored content for users with no login + no sync for this long.
+INACTIVE_USER_CONTENT_PURGE_DAYS = _int_env("INACTIVE_USER_CONTENT_PURGE_DAYS", 180)
 
 def describe() -> str:
     """Human-readable one-liner for boot logs."""
     return (
         f"APP_ENV={APP_ENV} IS_PRODUCTION={IS_PRODUCTION} CLOUD_MODE={CLOUD_MODE} "
-        f"STORE_RAW_CANVAS_JSON={STORE_RAW_CANVAS_JSON}"
+        f"STORE_RAW_CANVAS_JSON={STORE_RAW_CANVAS_JSON} ENABLE_AI_RESOLVE={ENABLE_AI_RESOLVE}"
     )

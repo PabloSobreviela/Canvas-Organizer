@@ -1,7 +1,7 @@
 # CanvasSync Operations Runbook
 
 Operational procedures for running CanvasSync in production (Google Cloud Run +
-Supabase + OpenRouter). Companion to `docs/OIT_READINESS_AUDIT.md`.
+Supabase + direct DeepInfra). Companion to `docs/OIT_READINESS_AUDIT.md`.
 
 ---
 
@@ -23,7 +23,7 @@ Required production configuration:
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Database access |
 | `CANVAS_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI` | Canvas OAuth (developer key) |
 | `FRONTEND_URL` | Redirect target + CORS |
-| `LLM_API_KEY` | OpenRouter API key (AI date extraction) |
+| `DEEPINFRA_API_KEY` | Direct DeepInfra API key (required when AI is enabled) |
 | `RATELIMIT_STORAGE_URI` | Distributed rate-limit store (e.g. `redis://...`) |
 
 Optional but recommended:
@@ -36,14 +36,10 @@ Optional but recommended:
 | `ASSIGNMENT_RETENTION_DAYS` | `180` | Retention for assignments |
 | `COURSE_RETENTION_DAYS` | `180` | Retention for course metadata rows |
 | `SYLLABUS_RULES_RETENTION_DAYS` | `180` | Retention for syllabus rules |
-| `AI_USAGE_LOG_RETENTION_DAYS` | `365` | Retention for AI usage logs |
-| `INACTIVE_USER_CONTENT_PURGE_DAYS` | `0` (off) | Purge synced content for inactive users |
-| `DISCLOSED_AI_PROVIDERS` | `openrouter,deepinfra` | Providers data may be routed to |
-| `OPENROUTER_PROVIDER_ONLY` | `deepinfra` | Pin OpenRouter routing to DeepInfra |
-| `OPENROUTER_ENFORCE_ZDR` | `true` | Require zero-data-retention routing |
-| `OPENROUTER_DENY_DATA_COLLECTION` | `true` | Deny provider data collection |
-| `OPENROUTER_ALLOW_FALLBACK` | `false` | Disable provider fallback |
-| `RETENTION_CRON_SECRET` | (unset) | Enables `/api/admin/retention/run` |
+| `INACTIVE_USER_CONTENT_PURGE_DAYS` | `180` | Purge synced content for inactive users |
+| `ENABLE_AI_RESOLVE` | `true` | Enable direct DeepInfra date extraction |
+| `LLM_BASE_URL` | `https://api.deepinfra.com/v1/openai` | Direct DeepInfra endpoint |
+| `MODEL_NAME` | `Qwen/Qwen3-235B-A22B-Instruct-2507` | Fixed inference model |
 
 ---
 
@@ -79,21 +75,21 @@ Rotate on a schedule and immediately on any suspected exposure.
 - Rotate in the Supabase dashboard (API settings), update the Cloud Run secret,
   deploy. The service key bypasses RLS — treat as a top-tier secret.
 
-### 2.5 OpenRouter / DeepInfra API keys
-- Rotate in the provider dashboard, update Cloud Run env, deploy. No data impact.
+### 2.5 DeepInfra API key
+- Rotate in the DeepInfra dashboard, add a new `deepinfra-api-key` Secret
+  Manager version, and deploy. No data migration is required.
 
 ---
 
 ## 3. Data retention
 
 Retention is enforced by `backend/retention_service.py` using the windows in
-section 1. Two ways to run it:
+section 1:
 
-- **Scheduled Cloud Run Job (preferred):** schedule `python retention_service.py`
+- **Scheduled Cloud Run Job:** schedule `python retention_service.py`
   daily. It applies all configured windows and logs per-category delete counts.
-- **Authenticated endpoint:** set `RETENTION_CRON_SECRET` and POST to
-  `/api/admin/retention/run` with header `X-Retention-Secret: <secret>` from a
-  scheduler. The endpoint is disabled (404) when the secret is unset.
+
+There is deliberately no internet-facing retention endpoint.
 
 Indexes supporting efficient purges: `backend/migrations/006_retention_indexes.sql`.
 

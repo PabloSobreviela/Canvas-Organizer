@@ -16,9 +16,9 @@ export default function PrivacyPage() {
 
       <LegalSection title="2. Information we collect">
         <p><strong className="text-zinc-100">From Canvas OAuth:</strong> email, display name, and Canvas user identifier; encrypted OAuth tokens to access Canvas on your behalf.</p>
-        <p><strong className="text-zinc-100">From sync:</strong> course names and codes; assignment titles and dates; syllabus and module file text extracts; announcement titles and message excerpts needed for scheduling.</p>
-        <p><strong className="text-zinc-100">We do not collect:</strong> grades, submission content, quiz answers, payment information, or government ID numbers.</p>
-        <p><strong className="text-zinc-100">Technical metadata:</strong> API usage logs (e.g. token counts for AI billing) without storing full AI prompts or responses in our database.</p>
+        <p><strong className="text-zinc-100">From sync:</strong> course names and codes; assignment titles, dates, and completion/submission status; syllabus and module file text extracts; announcement titles and message excerpts needed for scheduling.</p>
+        <p><strong className="text-zinc-100">We do not collect:</strong> grades, submitted work or submission comments, quiz answers, payment information, or government ID numbers.</p>
+        <p><strong className="text-zinc-100">Technical metadata:</strong> security and request logs needed to operate the Service. We do not maintain an AI prompt, completion, or token-usage log database.</p>
       </LegalSection>
 
       <LegalSection title="3. How we use information">
@@ -30,12 +30,15 @@ export default function PrivacyPage() {
         </ul>
       </LegalSection>
 
-      <LegalSection title="4. AI processing (OpenRouter to DeepInfra)">
+      <LegalSection title="4. AI processing (direct DeepInfra)">
         <p>
-          When you sync a course, we send relevant course text to <strong className="text-zinc-100">OpenRouter</strong> (an API gateway), which routes the request to <strong className="text-zinc-100">DeepInfra</strong> for AI inference. We use this to infer due dates that Canvas does not expose directly.
+          When you sync a course, we send relevant course text directly to <strong className="text-zinc-100">DeepInfra</strong> using the <strong className="text-zinc-100">Qwen3-235B-A22B-Instruct-2507</strong> model. We use this to infer due dates that Canvas does not expose directly.
         </p>
         <p>
-          AI requests are pinned to DeepInfra, require zero-data-retention (ZDR) routing, deny provider data collection, and disable provider fallback. If a matching DeepInfra ZDR endpoint is not available, the request should fail instead of routing to another provider. We do not intentionally include your name, email, or Canvas user ID in AI prompts, and we do not store full AI prompts or completions in our database.
+          No AI gateway or alternate-provider fallback is used. We do not intentionally include your name, email, or Canvas user ID in AI prompts, and we do not store AI prompts, completions, or token-usage logs in our database.
+        </p>
+        <p>
+          DeepInfra states that ordinary inference inputs and outputs are processed in memory, are not used for model training, and are not stored to disk. DeepInfra also reserves the right to log a small portion of requests when necessary for debugging or security. Its current privacy terms therefore apply to course text sent for inference.
         </p>
         <p>
           <strong className="text-zinc-100">Important limitation:</strong> course text is not guaranteed anonymous. Syllabi, announcements, and files may contain instructor names, student names, email addresses, office locations, or other identifiers. We apply automated redaction for common patterns such as emails, phone numbers, tokens, and ID-like numbers before sending, but incidental identifying information may remain.
@@ -47,12 +50,14 @@ export default function PrivacyPage() {
           <li><strong className="text-zinc-100">Supabase</strong> — encrypted database hosting (service role access from our API only).</li>
           <li><strong className="text-zinc-100">Google Cloud Run</strong> — backend API.</li>
           <li><strong className="text-zinc-100">Vercel</strong> — frontend hosting.</li>
+          <li><strong className="text-zinc-100">DeepInfra</strong> — direct AI inference.</li>
         </ul>
       </LegalSection>
 
       <LegalSection title="6. Retention and deletion">
-        <p>We retain synced data until you delete it or stop using the Service. You can export or permanently delete all stored data from Settings, which revokes Canvas tokens and erases stored rows.</p>
-        <p>OAuth tokens are removed on logout. Contact us if you need help deleting data.</p>
+        <p>Synced course content is subject to a 180-day retention window. A scheduled retention job removes stale assignments, courses, announcements, syllabus rules, and extracted file text. We do not maintain a separate AI prompt, completion, or token-usage history.</p>
+        <p>You can export or permanently delete all stored account data from Settings. Deletion revokes Canvas access, invalidates active sessions, and erases stored account and course rows. Logging out revokes and removes the stored Canvas OAuth tokens without deleting the rest of your account data.</p>
+        <p>Contact us if you need help exercising these controls.</p>
       </LegalSection>
 
       <LegalSection title="7. Security">

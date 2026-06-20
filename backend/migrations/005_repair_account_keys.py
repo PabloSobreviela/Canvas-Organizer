@@ -41,8 +41,7 @@ DEDUPE_KEYS = {
     "announcements": ["course_id", "canvas_announcement_id"],
     "syllabus_rules": ["course_id"],
 }
-# ai_usage_logs are immutable events; we only repoint their key, never dedupe.
-REPOINT_ONLY = ["ai_usage_logs"]
+REPOINT_ONLY = []
 
 ORDER_HINT = {
     "courses": "synced_at",

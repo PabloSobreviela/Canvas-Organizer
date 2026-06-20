@@ -1,10 +1,10 @@
 # CanvasSync Privacy Policy
 
-**Version:** 2026-05-20  
+**Version:** 2026-06-19
 **Public URL:** `/privacy` on the CanvasSync web app
 
 Canonical copy: `frontend/src/pages/PrivacyPage.js`
 
-**AI:** Core feature via OpenRouter routed to DeepInfra with ZDR required; I/O logging off on our account; content anonymity not fully guaranteed.
+**AI:** Core feature sent directly to DeepInfra using `Qwen/Qwen3-235B-A22B-Instruct-2507`. No AI gateway or alternate-provider fallback is used. Content anonymity is not guaranteed.
 
-See also: [OpenRouter privacy notes](../OPENROUTER_PRIVACY.md)
+See also: [DeepInfra privacy notes](../DEEPINFRA_PRIVACY.md)

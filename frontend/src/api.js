@@ -47,14 +47,6 @@ async function apiCall(endpoint, options = {}) {
 // Canvas API Endpoints
 // Canvas credentials are now stored server-side via OAuth, so no need to pass base_url/token
 
-export async function testCanvas(baseUrl, token) {
-    const response = await apiCall('/api/canvas/test', {
-        method: 'POST',
-        body: JSON.stringify({ base_url: baseUrl, token })
-    });
-    return response.json();
-}
-
 export async function fetchCourses(baseUrl, token) {
     const response = await apiCall('/api/canvas/courses', {
         method: 'POST',

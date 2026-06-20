@@ -24,6 +24,11 @@ frontend/.env.production.local
 
 # Local user data and cached course materials (PDFs, extracted text)
 backend/data/
+data/
+
+# Local runtime/editor artifacts
+*.log
+.cursor/
 
 # Python cache
 __pycache__/

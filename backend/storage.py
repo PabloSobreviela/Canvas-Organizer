@@ -136,7 +136,7 @@ def delete_user_storage(user_id: str) -> int:
     if not to_remove:
         return 0
     removed = delete_storage_paths(to_remove)
-    logger.info("Deleted %d storage object(s) for user %s", removed, user_id)
+    logger.info("Deleted %d private storage object(s) for one user", removed)
     return removed
 
 
@@ -172,7 +172,7 @@ def upload_user_file(user_id: str, course_id: str, filename: str, file_content: 
         {"content-type": content_type},
     )
 
-    print(f"[OK] Uploaded: {BUCKET_NAME}/{storage_path}")
+    logger.info("Uploaded one user file to private storage")
     return storage_path
 
 
@@ -192,7 +192,7 @@ def download_user_file(user_id: str, course_id: str, filename: str,
         data = _storage_bucket().download(storage_path)
         return data
     except Exception as e:
-        print(f"[WARN] File not found or download failed: {BUCKET_NAME}/{storage_path} – {e}")
+        logger.warning("Private storage download failed: %s", type(e).__name__)
         return None
 
 
@@ -211,11 +211,11 @@ def delete_user_file(user_id: str, course_id: str, filename: str,
     try:
         result = _storage_bucket().remove([storage_path])
         if result:
-            print(f"[INFO] Deleted: {BUCKET_NAME}/{storage_path}")
+            logger.info("Deleted one user file from private storage")
             return True
         return False
     except Exception as e:
-        print(f"[WARN] Delete failed: {BUCKET_NAME}/{storage_path} – {e}")
+        logger.warning("Private storage delete failed: %s", type(e).__name__)
         return False
 
 
@@ -237,7 +237,7 @@ def list_user_files(user_id: str, course_id: str, subfolder: str = "files") -> L
             if entry.get("name") and entry.get("id")  # skip folder placeholders
         ]
     except Exception as e:
-        print(f"[WARN] List failed: {BUCKET_NAME}/{folder_path} – {e}")
+        logger.warning("Private storage list failed: %s", type(e).__name__)
         return []
 
 
@@ -261,7 +261,7 @@ def get_signed_url(user_id: str, course_id: str, filename: str,
         result = _storage_bucket().create_signed_url(storage_path, expires_in)
         return result.get("signedURL") or result.get("signedUrl")
     except Exception as e:
-        print(f"[WARN] Signed URL failed: {BUCKET_NAME}/{storage_path} – {e}")
+        logger.warning("Private storage signed-URL creation failed: %s", type(e).__name__)
         return None
 
 
