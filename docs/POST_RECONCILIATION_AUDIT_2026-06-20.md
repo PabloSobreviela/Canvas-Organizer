@@ -53,8 +53,9 @@ It is **not ready for a real-user OAuth pilot or production approval** because:
 - Runtime reconciliation commit: `093e61ef73341ad2610a4eddf3aa05e607c94f73`.
 - Draft PR: `https://github.com/PabloSobreviela/Canvas-Organizer/pull/1`.
 - Local ignored `backend/.env` is a non-secret development configuration with
-  AI disabled and the direct DeepInfra endpoint/model. Its former legacy
-  contents are preserved only as an ignored inactive backup.
+  AI disabled and the direct DeepInfra endpoint/model. The former legacy
+  provider configuration was removed rather than retained as an active or
+  backup environment file.
 - Local skill-install and benchmark artifacts were not committed.
 
 ### Vercel
