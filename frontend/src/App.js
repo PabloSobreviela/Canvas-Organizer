@@ -55,7 +55,7 @@ function PilotBanner() {
   if (!SHOW_PILOT_BANNER) return null;
   return (
     <div className="shrink-0 bg-amber-950/80 border-b border-amber-900/60 px-4 py-2 text-center text-xs text-amber-200">
-      <strong>Pilot.</strong> CanvasSync is not an official Georgia Tech service. Verify deadlines in Canvas.
+      <strong>Student preview.</strong> CanvasSync is not an official Georgia Tech service. Verify deadlines in Canvas.
     </div>
   );
 }
@@ -4209,7 +4209,7 @@ function App() {
                   See what&rsquo;s due — and where it came from.
                 </h1>
                 <p className="mt-4 text-zinc-400 text-[15px] leading-relaxed max-w-md">
-                  CanvasSync turns official Canvas assignments and course-material dates into one calm weekly timeline. Canvas items stay labeled. AI-assisted dates stay reviewable.
+                  CanvasSync turns Canvas-provided assignments and course-material dates into one calm weekly timeline. Canvas items stay labeled. AI-assisted dates stay reviewable.
                 </p>
 
                 <div className="mt-7 flex flex-wrap items-center gap-3">
@@ -4239,7 +4239,7 @@ function App() {
 
                 <div className="mt-9 space-y-2.5 text-sm">
                   {[
-                    ["Official Canvas dates", "Assignments keep a clear Canvas label when they come from the gradebook"],
+                    ["Canvas-provided dates", "Assignments keep a clear Canvas label when they come from the gradebook"],
                     ["Course-material dates", "Dates found in files, pages, modules, and announcements stay reviewable"],
                     ["One weekly timeline", "Completion, filters, and course labels stay focused on deadline recovery"],
                   ].map(([title, desc]) => (

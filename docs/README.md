@@ -3,6 +3,9 @@
 ## Current review package
 
 - `GT_OIT_OUTREACH.md` — process-only first inquiry
+- `GT_OIT_COMPLIANCE_REQUEST_2026-07-05.md` — concise send-ready request package
+- `DEVELOPER_APPROVAL_STRATEGY_2026-07-05.md` — internal positioning, timeline,
+  and approval strategy
 - `OIT_SUBMISSION.md` — development-key technical review draft
 - `GT_CANVAS_OAUTH_COMPLIANCE_AND_APPROVAL_MAP_2026-06-20.md` — local-GT
   authority, stages, evidence, and decision gates

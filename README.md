@@ -231,7 +231,9 @@ present (see `validate_production_secrets` in `backend/auth.py` and the table in
 
 ## Security & Privacy
 
-See [SECURITY.md](SECURITY.md) and `docs/OIT_READINESS_AUDIT.md`. Key points:
+See [SECURITY.md](SECURITY.md),
+[`docs/POST_RECONCILIATION_AUDIT_2026-06-20.md`](docs/POST_RECONCILIATION_AUDIT_2026-06-20.md),
+and [`docs/OIT_SUBMISSION.md`](docs/OIT_SUBMISSION.md). Key points:
 
 - **Canvas tokens encrypted at rest** with Fernet before storage in Supabase.
 - **Stable account-scoped data keys** (never derived from rotating tokens).
