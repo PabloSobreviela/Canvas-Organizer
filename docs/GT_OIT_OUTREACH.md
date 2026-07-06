@@ -1,7 +1,8 @@
 # Georgia Tech Digital Learning Outreach
 
 **Status:** Draft — not yet sent
-**Recipient:** `canvas@gatech.edu`
+**Submit through:** Georgia Tech Digital Learning's Canvas "Request Help" form
+**Fallback route:** Georgia Tech OIT ticket or `support@oit.gatech.edu`, asking routing to Digital Learning / Canvas administration
 **Project contact:** `pablo3@gatech.edu`
 **Prepared:** June 20, 2026
 

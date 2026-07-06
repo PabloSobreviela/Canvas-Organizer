@@ -16,10 +16,11 @@ Do not lead with “vendor,” “outside app,” “production pilot,” “off
 
 Primary first contact:
 
-- `canvas@gatech.edu`
-- Use Georgia Tech Digital Learning’s “Request Help” link if email bounces or a ticket is preferred.
+- Georgia Tech Digital Learning's Canvas "Request Help" ServiceNow route:
+  `https://gatech.service-now.com/continuity?id=sc_cat_item&sys_id=cb9a617fdbd30810391b9837db9619ad`
+- Fallback: submit a general OIT ticket or email `support@oit.gatech.edu`, asking routing to Digital Learning / Canvas administration.
 
-Why: Digital Learning publishes `canvas@gatech.edu` as the Canvas contact and describes itself as overseeing academic platforms/tools.
+Why: Digital Learning's public Canvas contact page still lists `canvas@gatech.edu`, but it also provides the "Request Help" ServiceNow route. If the mailbox does not resolve in your mail client, use the ticket route as the primary channel.
 
 Do not initially CC Security, Legal, Procurement, or Instructure. Ask Digital Learning to route the request. If routed:
 
@@ -29,7 +30,7 @@ Do not initially CC Security, Legal, Procurement, or Instructure. Ask Digital Le
 
 ## Approval strategy
 
-1. Send a process-first email to `canvas@gatech.edu`.
+1. Submit a process-first Digital Learning / Canvas ticket through ServiceNow.
 2. Ask whether GT permits a student-developed, non-LTI external OAuth REST app.
 3. Ask whether a streamlined student-development or limited-development path exists.
 4. Separate OAuth approval from AI approval. Default position: AI can stay disabled for GT Canvas data until GT approves it.

@@ -1,11 +1,12 @@
 # CanvasSync — Send-Ready GT Digital Learning Request
 
 **Prepared:** July 5, 2026  
-**Send to:** `canvas@gatech.edu`  
+**Submit through:** Georgia Tech Digital Learning's Canvas "Request Help" form  
+**Fallback route:** Georgia Tech OIT ticket or `support@oit.gatech.edu`, asking routing to Digital Learning / Canvas administration  
 **From:** `pablo3@gatech.edu`  
 **Request:** Process guidance and, if permitted, a non-production Canvas OAuth Developer Key.
 
-## Email to send
+## Ticket text to send
 
 **Subject:** Process guidance for GT student-developed external Canvas OAuth app
 
@@ -147,7 +148,8 @@ If GT permits this app model, I will provide the exact staging callback, scope m
 
 ## Source basis
 
-- GT Digital Learning contact: https://canvas.gatech.edu/contact-us/
+- GT Digital Learning contact page, which lists both `canvas@gatech.edu` and the Canvas "Request Help" ServiceNow route: https://canvas.gatech.edu/contact-us/
+- GT OIT contact page, which lists ticket submission and `support@oit.gatech.edu`: https://oit.gatech.edu/contact-us
 - GT Digital Learning role: https://canvas.gatech.edu/about-us/
 - GT LTI process: https://sites.gatech.edu/dlt-blog/2026/03/26/updated-lti-vetting-process/
 - GT AI guidance: https://oit.gatech.edu/ai/guidance

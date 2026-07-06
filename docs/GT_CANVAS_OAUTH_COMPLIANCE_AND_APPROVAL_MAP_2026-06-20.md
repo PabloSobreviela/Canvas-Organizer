@@ -18,8 +18,11 @@ certification program.
 Instructure defines the OAuth/API mechanism and policy. Its administrator
 documentation places creation, scoping, enablement, and revocation of Developer
 API Keys in the institution's Canvas root account. Georgia Tech's Digital
-Learning Team oversees academic platforms and tools and publishes
-`canvas@gatech.edu` as its Canvas contact.
+Learning Team oversees academic platforms and tools and publishes a Canvas
+"Request Help" ServiceNow route. Its public Canvas contact page also lists
+`canvas@gatech.edu`; if that mailbox does not resolve, use the ServiceNow route
+or a general OIT ticket and ask for routing to Digital Learning / Canvas
+administration.
 
 CanvasSync is not an LTI tool. Georgia Tech's published January 1, 2026
 certification requirement expressly applies to new third-party tools integrated
@@ -89,7 +92,10 @@ Digital Learning.
 | End-user authorization | Each user through Canvas OAuth consent |
 | Ongoing key compliance and incident response | CanvasSync operator plus Georgia Tech's right to disable the key |
 
-Primary local contact: `canvas@gatech.edu`.
+Primary local route: Georgia Tech Digital Learning's Canvas "Request Help"
+ServiceNow form. Fallback route: Georgia Tech OIT ticket or
+`support@oit.gatech.edu`, asking for routing to Digital Learning / Canvas
+administration.
 
 ## 4. Approval-process map
 
@@ -170,7 +176,8 @@ This does not replace the real GT OAuth/staging tests required before a pilot.
 ## 6. Stage 1 â€” Local process inquiry
 
 **Owner:** CanvasSync developer
-**Recipient:** Georgia Tech Digital Learning, `canvas@gatech.edu`
+**Recipient:** Georgia Tech Digital Learning via the Canvas "Request Help"
+ServiceNow form
 
 The inquiry should ask:
 
@@ -455,7 +462,8 @@ Canvas tool.
 
 ### Ready now
 
-- Send a local process inquiry to `canvas@gatech.edu`.
+- Send a local process inquiry through Georgia Tech Digital Learning's Canvas
+  "Request Help" ServiceNow form.
 - Present CanvasSync as independent and Georgia Tech student-developed.
 - Request a test-only Developer Key and ask for the streamlined student path.
 - Explain that this is a local GT root-account decision, not global Instructure
