@@ -1,249 +1,92 @@
-# Troubleshooting: Cloud Run 503 Errors & CORS Failures
+# Troubleshooting
 
-## Symptoms
+Production stack: **Vercel** (frontend) + **Google Cloud Run** (backend) + **Supabase**.
 
-- Frontend shows **CORS policy errors**: `No 'Access-Control-Allow-Origin' header is present`
-- Browser console shows `net::ERR_FAILED` on all API calls
-- Backend health endpoint (`/api/health`) returns **503 Service Unavailable**
-- App appears stuck on "Connecting..." or reloads endlessly
+## Backend won't start (Cloud Run)
 
-> **Key insight:** If the health endpoint itself returns 503, the problem is NOT CORS configuration — the backend container is failing to start. CORS headers are absent because Flask never runs.
+**Symptom:** Revision fails health checks or logs `Missing required production configuration`.
 
----
+**Fix:** Ensure all secrets in [`deploy.ps1`](deploy.ps1) exist in GCP Secret Manager and
+`APP_ENV=production` is set. See [`docs/OPS_RUNBOOK.md`](docs/OPS_RUNBOOK.md) §1.
 
-## Root Cause: Python Version Incompatibility (2026-02-10)
+Common missing vars:
+- `SESSION_SECRET_KEY` (≥32 characters)
+- `CANVAS_TOKEN_ENCRYPTION_KEY` (Fernet key)
+- `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`
+- `CANVAS_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI`
+- `FRONTEND_URL`
+- `RATELIMIT_STORAGE_URI` (must not be `memory://` in production)
+- `DEEPINFRA_API_KEY` (required for direct AI date extraction)
 
-### What happened
+## OAuth / "Sign in with Canvas" fails
 
-The Cloud Run container uses **Python 3.11** (`Dockerfile`: `FROM python:3.11`), but development was done on **Python 3.12+**.
+1. **Developer key not provisioned** — GT OIT must create the key; see
+   [`docs/GT_OIT_OUTREACH.md`](docs/GT_OIT_OUTREACH.md).
+2. **Redirect URI mismatch** — must exactly match Cloud Run URL +
+   `/api/auth/canvas/callback` registered on the Canvas developer key.
+3. **CORS** — `FRONTEND_URL` must match the Vercel origin; check browser devtools
+   for blocked preflight.
+4. **Cookies** — session cookie is on the API domain; frontend must call API with
+   `credentials: 'include'`.
 
-Python 3.12 relaxed f-string parsing rules to allow `#` comments inside `{}` expressions. Python 3.11 does **not** allow this and raises a `SyntaxError` at import time.
+## Sync returns 403 `legal_consent_required`
 
-The offending code was in `backend/ai/llm_model.py` (formerly `gemini_model.py`), inside a large f-string prompt:
+User must accept the consent modal before any Canvas data is ingested. If consent
+version changed, re-accept from the modal.
 
-```python
-# ❌ BROKEN on Python 3.11 — # inside f-string {} expression
-full_prompt = f"""...
-{json.dumps([{
-    "cid": a["canvas_assignment_id"],
-    "nam": a["name"],
-    "due": a["ai_ready_date"],
-    # This comment causes SyntaxError on Python 3.11!
-    "des": (a.get("description") or "")[:600]
-} for a in clean_assignments], ensure_ascii=False, indent=2)}
-..."""
-```
+## Assignments disappear after reconnect
 
-### The error message
-
-```
-SyntaxError: f-string expression part cannot include '#' (llm_model.py, line 198)
-```
-
-### Why it was hard to find
-
-1. `py_compile` on the local machine (Python 3.12+) passed — the syntax is valid in 3.12.
-2. Cloud Run logs were **silent** by default — gunicorn workers crashed before Flask could handle any request, and the default error output was not visible in `gcloud logging read` without specific formatting.
-3. The 503 response has no body and no CORS headers, making it look like a CORS misconfiguration.
-
-### The fix
-
-Remove `#` comments from inside f-string `{}` expression blocks:
-
-```python
-# ✅ FIXED — comment removed from inside the expression
-full_prompt = f"""...
-{json.dumps([{
-    "cid": a["canvas_assignment_id"],
-    "nam": a["name"],
-    "due": a["ai_ready_date"],
-    "des": (a.get("description") or "")[:600]
-} for a in clean_assignments], ensure_ascii=False, indent=2)}
-..."""
-```
-
----
-
-## Root Cause: Model Unavailable / Invalid Model Name (2026-02-10)
-
-If `/api/resolve_course_dates` fails with a 404 or model-not-found error, the backend
-is configured to use a model name that is no longer available on the Lambda Labs cluster.
-
-### Fix
-
-1. Update the Cloud Run env var `MODEL_NAME` to a supported model (primary: `qwen-2.5-coder-32b-instruct`, fallback: `llama-3.3-70b-instruct`).
-2. Redeploy the backend so the new env vars apply.
-
-```powershell
-.\scripts\deploy.ps1 -Only backend -ModelName qwen-2.5-coder-32b-instruct
-```
-
----
-
-## Diagnostic Playbook
-
-If you see 503 errors again, follow this sequence:
-
-### Step 1: Confirm the container is failing (not a CORS issue)
+Run account-key repair migration if upgrading from an older deploy:
 
 ```bash
-curl -v https://canvas-organizer-backend-93870731079.us-central1.run.app/api/health
+cd backend
+python migrations/005_repair_account_keys.py --dry-run
+python migrations/005_repair_account_keys.py
 ```
 
-- **200 OK** → Container is running. Problem is in CORS config or frontend.
-- **503** → Container is crashing. Proceed to Step 2.
+## CORS errors from Vercel preview deploys
 
-### Step 2: Check Cloud Run logs
+Production Cloud Run only allows configured origins. For preview URLs, set:
+
+```
+CORS_ALLOWED_ORIGIN_PATTERNS=https://your-project-*.vercel.app
+```
+
+## Local development
+
+Local mode uses SQLite with **no authentication**. Never expose locally with
+`APP_ENV=production` unset on a public host.
 
 ```bash
-gcloud logging read \
-  "resource.type=cloud_run_revision AND resource.labels.service_name=canvas-organizer-backend" \
-  --limit 80 \
-  --format="csv(timestamp,textPayload)" \
-  --freshness=2h \
-  | Out-File -FilePath debug_logs.log -Encoding ascii
+cd backend && python app.py   # http://localhost:5000
+cd frontend && npm start      # http://localhost:3000
 ```
 
-Then open `debug_logs.log` and look for:
-- `Worker exiting (pid: ...)` → Worker crashed during startup
-- `SyntaxError` or `ImportError` → Code issue
-- `ModuleNotFoundError` → Missing dependency in `requirements.txt`
-- No logs at all → Container OOMing before it can log (increase `--memory`)
+Set `REACT_APP_API_URL=http://localhost:5000` in `frontend/.env.local`.
 
-### Step 3: Check environment variables
+Cloud mode locally: `CLOUD_MODE=true` in `backend/.env` with Supabase credentials.
+
+## Memory / timeouts on Cloud Run
+
+Python + AI SDK needs ≥1Gi. Default in `deploy.ps1` is 2Gi. Increase if syncs
+timeout:
+
+```powershell
+.\deploy.ps1 -Memory 4Gi
+```
+
+## Rate limit / sync throttled
+
+Course-sync spacing and hourly caps use the Supabase `rate_limits` table.
+Flask endpoint limits use `RATELIMIT_STORAGE_URI`; `memory://` is process-local.
+If a shared Redis-compatible URI is configured, verify it is reachable from
+Cloud Run before representing those endpoint limits as multi-instance safe.
+
+## Verification harness
 
 ```bash
-gcloud run services describe canvas-organizer-backend \
-  --region us-central1 \
-  --format="yaml(spec.template.spec.containers[0].env)"
+python backend/tools/verify_deploy.py https://YOUR_BACKEND_URL \
+  --origin https://canvas-organizer.vercel.app
 ```
 
-Required env vars for cloud mode:
-| Variable | Example | Purpose |
-|---|---|---|
-| `USE_FIRESTORE` | `true` | Enables Firestore + Firebase Auth |
-| `GCP_PROJECT_ID` | `canvas-organizer-4437b` | GCP project |
-| `GCP_LOCATION` | `us-central1` | Cloud Run region |
-| `FIREBASE_PROJECT_ID` | `canvas-organizer-4437b` | Firebase token verification |
-| `MODEL_NAME` | `qwen-2.5-coder-32b-instruct` | AI model for date resolution |
-| `LAMBDA_API_KEY` | (API key) | Lambda Labs inference API key |
-| `CANVAS_TOKEN_ENCRYPTION_KEY` | (Fernet key) | Encrypts stored Canvas tokens |
-
-### Step 4: Check resource limits
-
-```bash
-gcloud run services describe canvas-organizer-backend \
-  --region us-central1 \
-  --format="value(spec.template.spec.containers[0].resources.limits)"
-```
-
-- Minimum recommended: `memory=1Gi`
-- Current production: `memory=2Gi, cpu=2`
-- If memory is `512Mi`, increase it — the Python stack with AI libraries needs more.
-
-### Step 5: Inject debug logging (last resort)
-
-If logs are empty, add this to the top of `app.py` temporarily:
-
-```python
-import sys
-print("--- [BOOT] app.py STARTING ---", file=sys.stdout, flush=True)
-
-# Wrap each import group in try/except:
-try:
-    from flask import Flask, request, jsonify, g
-    print("--- [BOOT] Flask OK ---", file=sys.stdout, flush=True)
-except Exception as e:
-    print(f"--- [BOOT] Flask FAILED: {e} ---", file=sys.stdout, flush=True)
-    sys.exit(1)
-
-try:
-    from ai.llm_model import resolve_assignment_dates_with_llm
-    print("--- [BOOT] AI model OK ---", file=sys.stdout, flush=True)
-except Exception as e:
-    print(f"--- [BOOT] AI model FAILED: {e} ---", file=sys.stdout, flush=True)
-    sys.exit(1)
-```
-
-Deploy, trigger the error, then check logs per Step 2. **Remove the debug logging after diagnosing.**
-
----
-
-## Common Pitfalls
-
-| Pitfall | Rule |
-|---|---|
-| `#` comments inside f-string `{}` | **Never** use `#` inside f-string expressions when targeting Python <3.12 |
-| Heavy imports at module level | Defer `import openai` into functions to keep worker startup fast |
-| Missing `FIREBASE_PROJECT_ID` | Always set explicitly; don't rely on `GOOGLE_CLOUD_PROJECT` fallback |
-| Low memory (`512Mi`) | Python + Firebase + AI SDK needs ≥1Gi; use 2Gi for safety |
-| `Dockerfile` Python version | Currently `python:3.11` — if upgrading, test f-string syntax compatibility |
-
----
-
-## Deployment Command Reference
-
-```powershell
-# Backend only
-.\scripts\deploy.ps1 -Only backend
-
-# Frontend only
-.\scripts\deploy.ps1 -Only hosting
-
-# Both
-.\scripts\deploy.ps1
-```
-
-The deploy script (`scripts/deploy.ps1`) sets `--memory 1Gi`, `--cpu 1`, and `FIREBASE_PROJECT_ID` automatically.
-Use `-Memory 2Gi -Cpu 2` only if you confirm your workload needs it.
-
----
-
-## Cloud Cost Audit Endpoint
-
-New backend endpoint:
-
-- `GET /api/cloud/cost-audit`
-
-It returns:
-
-- Time-bucketed spend (`series`) so you can see **when** costs happened.
-- Cloud Run breakdowns by SKU/service/revision/resource.
-- Artifact Registry breakdowns by SKU/repository/resource.
-
-### Required env vars (Cloud Run backend)
-
-| Variable | Example |
-|---|---|
-| `GCP_BILLING_PROJECT_ID` | `canvas-organizer-4437b` |
-| `GCP_BILLING_DATASET` | `billing_export` |
-| `GCP_BILLING_TABLE` | `gcp_billing_export_v1_xxxxx_xxxxx` |
-
-Optional:
-
-| Variable | Example | Purpose |
-|---|---|---|
-| `GCP_BILLING_FILTER_PROJECT_ID` | `canvas-organizer-4437b` | Project filter inside billing table |
-| `GCP_BILLING_BQ_LOCATION` | `US` | BigQuery job location |
-| `GCP_CLOUD_RUN_SERVICE` | `canvas-organizer-backend` | Default Cloud Run service filter |
-| `GCP_ARTIFACT_REPOSITORY` | `my-repo` | Default Artifact Registry repository filter |
-| `CLOUD_COST_ALLOWED_EMAILS` | `you@example.com` | Comma-separated allowlist |
-| `ENABLE_CLOUD_COST_AUDIT_ENDPOINT` | `true` | Enable/disable endpoint |
-
-### Terminal script
-
-Use:
-
-```powershell
-.\scripts\cloud_cost_audit.ps1 `
-  -ApiBase "https://<your-cloud-run-url>" `
-  -Token "<firebase-id-token>" `
-  -Days 7 `
-  -Granularity day
-```
-
-Local backend (no auth in local mode):
-
-```powershell
-.\scripts\cloud_cost_audit.ps1 -ApiBase "http://localhost:5000" -Days 7
-```
+See [`docs/PROD_VERIFICATION.md`](docs/PROD_VERIFICATION.md).

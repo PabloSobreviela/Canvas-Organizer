@@ -2,6 +2,10 @@
 # Provides Canvas LMS OAuth2 login flow and JWT-based session management for Flask routes
 
 from functools import wraps
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
 import secrets
@@ -12,7 +16,7 @@ from urllib.parse import urlencode
 
 import jwt
 import requests
-from flask import request, jsonify, redirect
+from flask import request, jsonify, redirect, make_response
 
 from db_supabase import (
     init_db,
@@ -20,6 +24,8 @@ from db_supabase import (
     get_user,
     update_user_last_login,
     update_user_canvas_oauth_credentials,
+    get_user_session_version,
+    increment_user_session_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,8 +39,38 @@ CANVAS_OAUTH_CLIENT_SECRET = os.getenv("CANVAS_OAUTH_CLIENT_SECRET", "")
 CANVAS_INSTANCE_URL = os.getenv("CANVAS_INSTANCE_URL", "https://gatech.instructure.com").rstrip("/")
 CANVAS_OAUTH_REDIRECT_URI = os.getenv("CANVAS_OAUTH_REDIRECT_URI", "")
 SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", "")
+CANVASSYNC_USER_AGENT = os.getenv(
+    "CANVASSYNC_USER_AGENT",
+    "CanvasSync/1.0 (Georgia Tech student-developed app; pablo3@gatech.edu)",
+)
+
+# Space-separated Canvas OAuth scopes (must be subset of developer key scopes).
+_DEFAULT_CANVAS_SCOPES = " ".join([
+    "url:GET|/api/v1/users/self",
+    "url:GET|/api/v1/courses",
+    "url:GET|/api/v1/courses/:id",
+    "url:GET|/api/v1/courses/:course_id/assignments",
+    "url:GET|/api/v1/courses/:course_id/files",
+    "url:GET|/api/v1/files/:id",
+    "url:GET|/api/v1/courses/:course_id/modules",
+    "url:GET|/api/v1/courses/:course_id/front_page",
+    "url:GET|/api/v1/courses/:course_id/pages",
+    "url:GET|/api/v1/courses/:course_id/pages/:url_or_id",
+    "url:GET|/api/v1/announcements",
+])
+CANVAS_OAUTH_SCOPES = (os.getenv("CANVAS_OAUTH_SCOPES") or _DEFAULT_CANVAS_SCOPES).strip()
+APPROVED_DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+APPROVED_DEEPINFRA_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507"
 
 SESSION_TOKEN_EXPIRY_HOURS = int(os.getenv("SESSION_TOKEN_EXPIRY_HOURS", "24"))
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "canvassync_session")
+OAUTH_CTX_COOKIE_NAME = os.getenv("OAUTH_CTX_COOKIE_NAME", "canvassync_oauth_ctx")
+
+from app_config import (
+    IS_PRODUCTION as _is_production,
+    CLOUD_MODE as _cloud_mode,
+    ENABLE_AI_RESOLVE as _ai_enabled,
+)
 
 try:
     AUTH_TOKEN_CACHE_SECONDS = int(os.getenv("AUTH_TOKEN_CACHE_SECONDS", "300"))
@@ -66,7 +102,80 @@ AUTH_DEBUG = os.getenv("AUTH_DEBUG", "").strip().lower() in {"1", "true", "yes",
 _AUTH_CACHE_LOCK = threading.Lock()
 _TOKEN_INFO_CACHE: dict[str, dict] = {}
 _USER_SYNC_CACHE: dict[str, dict] = {}
-_OAUTH_STATE_CACHE: dict[str, float] = {}
+
+
+def canvas_oauth_is_configured() -> bool:
+    """Return false for missing or intentionally pending GT developer-key values."""
+    values = (CANVAS_OAUTH_CLIENT_ID, CANVAS_OAUTH_CLIENT_SECRET, CANVAS_OAUTH_REDIRECT_URI)
+    if not all(str(value or "").strip() for value in values):
+        return False
+    combined = " ".join(str(value).strip().lower() for value in values)
+    return not any(marker in combined for marker in ("placeholder", "replace-me", "your-client"))
+
+
+def validate_production_secrets():
+    """
+    Fail fast when cloud mode is missing critical configuration.
+
+    This runs whenever cloud mode is active. In production we enforce the full
+    set (including Canvas OAuth credentials and a distributed rate-limit store)
+    so the service either boots correctly configured or not at all.
+    """
+    if not _cloud_mode:
+        return
+
+    missing = []
+    if not SESSION_SECRET_KEY or len(SESSION_SECRET_KEY) < 32:
+        missing.append("SESSION_SECRET_KEY (min 32 characters)")
+    if not os.getenv("CANVAS_TOKEN_ENCRYPTION_KEY", "").strip():
+        missing.append("CANVAS_TOKEN_ENCRYPTION_KEY")
+    if not os.getenv("SUPABASE_URL", "").strip():
+        missing.append("SUPABASE_URL")
+    if not os.getenv("SUPABASE_SERVICE_KEY", "").strip():
+        missing.append("SUPABASE_SERVICE_KEY")
+
+    if _is_production:
+        # Canvas OAuth is the only supported auth path in production.
+        if not CANVAS_OAUTH_CLIENT_ID:
+            missing.append("CANVAS_OAUTH_CLIENT_ID")
+        if not CANVAS_OAUTH_CLIENT_SECRET:
+            missing.append("CANVAS_OAUTH_CLIENT_SECRET")
+        if not CANVAS_OAUTH_REDIRECT_URI:
+            missing.append("CANVAS_OAUTH_REDIRECT_URI")
+        if not os.getenv("FRONTEND_URL", "").strip():
+            missing.append("FRONTEND_URL")
+        # Rate limits must be backed by a shared store on autoscaled hosts
+        # (in-memory limits are per-instance and trivially bypassed). See R9.
+        storage_uri = (os.getenv("RATELIMIT_STORAGE_URI") or "").strip()
+        allow_in_memory_limits = (
+            os.getenv("ALLOW_IN_MEMORY_RATE_LIMITS") or ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if (not storage_uri or storage_uri.startswith("memory://")) and not allow_in_memory_limits:
+            missing.append("RATELIMIT_STORAGE_URI (distributed store, e.g. redis://...)")
+        elif not storage_uri or storage_uri.startswith("memory://"):
+            logger.warning(
+                "Production is using explicitly approved temporary in-memory rate limits. "
+                "Configure a distributed RATELIMIT_STORAGE_URI before general launch."
+            )
+        llm_key = (os.getenv("DEEPINFRA_API_KEY") or "").strip()
+        if _ai_enabled and (not llm_key or llm_key == "your-deepinfra-api-key"):
+            missing.append("DEEPINFRA_API_KEY (direct DeepInfra key for AI date extraction)")
+        if _ai_enabled:
+            llm_base_url = (os.getenv("LLM_BASE_URL") or APPROVED_DEEPINFRA_BASE_URL).rstrip("/")
+            model_name = (os.getenv("MODEL_NAME") or APPROVED_DEEPINFRA_MODEL).strip()
+            if llm_base_url != APPROVED_DEEPINFRA_BASE_URL:
+                missing.append(
+                    f"LLM_BASE_URL (must be direct DeepInfra: {APPROVED_DEEPINFRA_BASE_URL})"
+                )
+            if model_name != APPROVED_DEEPINFRA_MODEL:
+                missing.append(
+                    f"MODEL_NAME (must be {APPROVED_DEEPINFRA_MODEL})"
+                )
+
+    if missing:
+        raise RuntimeError(
+            "Missing required production configuration: " + ", ".join(missing)
+        )
 
 
 def _prune_auth_caches(now_ts: float):
@@ -89,14 +198,6 @@ def _prune_auth_caches(now_ts: float):
         ]
         for uid in expired_users:
             _USER_SYNC_CACHE.pop(uid, None)
-
-    if _OAUTH_STATE_CACHE:
-        expired_states = [
-            state for state, ts in _OAUTH_STATE_CACHE.items()
-            if (now_ts - ts) > 600
-        ]
-        for state in expired_states:
-            _OAUTH_STATE_CACHE.pop(state, None)
 
 
 def _get_cached_user_info(token: str):
@@ -129,6 +230,91 @@ def _set_cached_user_info(token: str, user_info: dict, exp_timestamp: float = No
         }
 
 
+def _cookie_secure() -> bool:
+    return _is_production or request.is_secure
+
+
+def _sign_payload(payload_b64: str) -> str:
+    key = (SESSION_SECRET_KEY or "dev-insecure-key").encode("utf-8")
+    sig = hmac.new(key, payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{sig}"
+
+
+def _verify_signed_payload(signed: str, max_age_seconds: int = 600) -> dict | None:
+    if not signed or "." not in signed:
+        return None
+    payload_b64, sig = signed.rsplit(".", 1)
+    key = (SESSION_SECRET_KEY or "dev-insecure-key").encode("utf-8")
+    expected = hmac.new(key, payload_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(payload_b64.encode("utf-8"))
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    try:
+        if time.time() - float(data.get("ts", 0)) > max_age_seconds:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return data
+
+
+def _pkce_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def extract_session_token() -> str | None:
+    """Read session JWT from HttpOnly cookie (preferred) or Authorization header."""
+    cookie_token = (request.cookies.get(SESSION_COOKIE_NAME) or "").strip()
+    if cookie_token:
+        return cookie_token
+
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split("Bearer ", 1)[1].strip()
+        if not token:
+            return None
+        if _is_production:
+            # Production: Bearer is allowed only for server-minted demo JWTs.
+            try:
+                payload = jwt.decode(token, SESSION_SECRET_KEY, algorithms=["HS256"])
+                if payload.get("demo"):
+                    return token
+            except jwt.InvalidTokenError:
+                return None
+            return None
+        return token
+
+    return None
+
+
+def set_session_cookie(response, token: str):
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="None" if _cookie_secure() else "Lax",
+        max_age=SESSION_TOKEN_EXPIRY_HOURS * 3600,
+        path="/",
+    )
+
+
+def clear_session_cookie(response):
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        "",
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="None" if _cookie_secure() else "Lax",
+        max_age=0,
+        path="/",
+    )
+
+
 # ---------------------------------------------------------------------------
 # JWT helpers
 # ---------------------------------------------------------------------------
@@ -138,6 +324,7 @@ def _issue_session_jwt(
     email: str = None,
     name: str = None,
     extra_claims: dict | None = None,
+    session_version: int = 0,
 ) -> str:
     """Issue a signed JWT session token."""
     now = datetime.now(timezone.utc)
@@ -146,6 +333,7 @@ def _issue_session_jwt(
         "email": email,
         "name": name,
         "canvas_instance_url": CANVAS_INSTANCE_URL,
+        "sv": int(session_version or 0),
         "iat": now,
         "exp": now + timedelta(hours=SESSION_TOKEN_EXPIRY_HOURS),
     }
@@ -158,6 +346,8 @@ def _decode_session_jwt(token: str) -> dict | None:
     """Decode and verify a session JWT. Returns the payload dict or None."""
     try:
         payload = jwt.decode(token, SESSION_SECRET_KEY, algorithms=["HS256"])
+        if not _session_is_valid(payload):
+            return None
         return payload
     except jwt.ExpiredSignatureError:
         logger.debug("Session JWT expired")
@@ -168,20 +358,28 @@ def _decode_session_jwt(token: str) -> dict | None:
         return None
 
 
+def _session_is_valid(payload: dict) -> bool:
+    """Verify session_version claim matches the user row (server-side revocation)."""
+    user_id = payload.get("sub")
+    if not user_id:
+        return False
+    try:
+        expected = get_user_session_version(str(user_id))
+    except Exception as exc:
+        logger.warning("Session-version lookup failed: %s", type(exc).__name__)
+        return False
+    try:
+        token_sv = int(payload.get("sv", 0))
+    except (TypeError, ValueError):
+        token_sv = 0
+    return token_sv == expected
+
+
 # ---------------------------------------------------------------------------
 # Public token verification functions (preserve interface)
 # ---------------------------------------------------------------------------
 
 def verify_token(id_token: str) -> str | None:
-    """
-    Verify a session JWT and return the user ID.
-
-    Args:
-        id_token: The JWT session token
-
-    Returns:
-        The user ID (sub claim) if valid, None otherwise
-    """
     payload = _decode_session_jwt(id_token)
     if payload and payload.get("sub"):
         return payload["sub"]
@@ -189,12 +387,6 @@ def verify_token(id_token: str) -> str | None:
 
 
 def get_user_from_token(id_token: str) -> dict | None:
-    """
-    Verify session JWT and return user info.
-
-    Returns:
-        Dictionary with user info (uid, email, name) or None if invalid
-    """
     cached = _get_cached_user_info(id_token)
     if cached and cached.get("uid"):
         return cached
@@ -222,10 +414,6 @@ def get_user_from_token(id_token: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def ensure_user_exists(user_id: str, email: str, display_name: str = None):
-    """
-    Ensure user record exists in Supabase, create if not.
-    Called after successful authentication.
-    """
     now_ts = time.time()
     cache_entry = None
     if AUTH_USER_SYNC_CACHE_SECONDS > 0:
@@ -282,44 +470,14 @@ def ensure_user_exists(user_id: str, email: str, display_name: str = None):
 # ---------------------------------------------------------------------------
 
 def require_auth(f):
-    """
-    Flask decorator to require JWT session authentication on routes.
-
-    Usage:
-        @app.route('/api/protected')
-        @require_auth
-        def protected_route():
-            user_id = request.user_id
-            ...
-
-    The decorator:
-    1. Checks for Authorization header with Bearer token
-    2. Verifies the session JWT
-    3. Ensures user exists in Supabase
-    4. Injects user_id, user_email, user_name into request context
-    """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get("Authorization")
-
-        if not auth_header:
-            return jsonify({
-                "error": "Missing Authorization header",
-                "code": "AUTH_MISSING",
-            }), 401
-
-        if not auth_header.startswith("Bearer "):
-            return jsonify({
-                "error": "Invalid Authorization header format. Expected: Bearer <token>",
-                "code": "AUTH_FORMAT",
-            }), 401
-
-        token = auth_header.split("Bearer ")[1].strip()
+        token = extract_session_token()
 
         if not token:
             return jsonify({
-                "error": "Empty token",
-                "code": "AUTH_EMPTY",
+                "error": "Missing session",
+                "code": "AUTH_MISSING",
             }), 401
 
         user_info = get_user_from_token(token)
@@ -329,6 +487,14 @@ def require_auth(f):
                 "error": "Invalid or expired token",
                 "code": "AUTH_INVALID",
             }), 401
+
+        # Demo sessions are ephemeral; never block on Supabase user sync.
+        if user_info.get("demo"):
+            request.user_id = str(user_info["uid"])
+            request.user_email = user_info.get("email")
+            request.user_name = user_info.get("name")
+            request.is_demo = True
+            return f(*args, **kwargs)
 
         user_id = ensure_user_exists(
             user_info["uid"],
@@ -347,31 +513,23 @@ def require_auth(f):
 
 
 def optional_auth(f):
-    """
-    Flask decorator for optional authentication.
-    If token is provided and valid, user_id is set.
-    If not provided or invalid, user_id is None (but request proceeds).
-    """
     @wraps(f)
     def decorated_function(*args, **kwargs):
         request.user_id = None
         request.user_email = None
         request.user_name = None
 
-        auth_header = request.headers.get("Authorization")
-
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.split("Bearer ")[1].strip()
-            if token:
-                user_info = get_user_from_token(token)
-                if user_info:
-                    request.user_id = ensure_user_exists(
-                        user_info["uid"],
-                        user_info.get("email"),
-                        user_info.get("name"),
-                    )
-                    request.user_email = user_info.get("email")
-                    request.user_name = user_info.get("name")
+        token = extract_session_token()
+        if token:
+            user_info = get_user_from_token(token)
+            if user_info:
+                request.user_id = ensure_user_exists(
+                    user_info["uid"],
+                    user_info.get("email"),
+                    user_info.get("name"),
+                )
+                request.user_email = user_info.get("email")
+                request.user_name = user_info.get("name")
 
         return f(*args, **kwargs)
 
@@ -383,30 +541,49 @@ def optional_auth(f):
 # ---------------------------------------------------------------------------
 
 def canvas_oauth_login():
-    """
-    Initiate Canvas OAuth2 login. Returns a redirect response to the Canvas
-    authorization endpoint.
-    """
-    state = secrets.token_urlsafe(32)
-    with _AUTH_CACHE_LOCK:
-        _OAUTH_STATE_CACHE[state] = time.time()
+    """Initiate Canvas OAuth2 login with PKCE and signed state cookie."""
+    if not canvas_oauth_is_configured():
+        return jsonify({
+            "error": "Canvas OAuth is pending Georgia Tech developer-key approval.",
+            "code": "CANVAS_OAUTH_PENDING",
+        }), 503
+
+    state = secrets.token_urlsafe(24)
+    code_verifier = secrets.token_urlsafe(64)
+    ctx = {
+        "state": state,
+        "verifier": code_verifier,
+        "ts": time.time(),
+    }
+    ctx_b64 = base64.urlsafe_b64encode(json.dumps(ctx).encode("utf-8")).decode("utf-8")
+    signed_ctx = _sign_payload(ctx_b64)
 
     params = {
         "client_id": CANVAS_OAUTH_CLIENT_ID,
         "response_type": "code",
         "redirect_uri": CANVAS_OAUTH_REDIRECT_URI,
         "state": state,
+        "code_challenge": _pkce_challenge(code_verifier),
+        "code_challenge_method": "S256",
     }
+    if CANVAS_OAUTH_SCOPES:
+        params["scope"] = CANVAS_OAUTH_SCOPES
     authorize_url = f"{CANVAS_INSTANCE_URL}/login/oauth2/auth?{urlencode(params)}"
-    return redirect(authorize_url)
+    resp = redirect(authorize_url)
+    resp.set_cookie(
+        OAUTH_CTX_COOKIE_NAME,
+        signed_ctx,
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="Lax",
+        max_age=600,
+        path="/",
+    )
+    return resp
 
 
 def canvas_oauth_callback():
-    """
-    Handle Canvas OAuth2 callback. Exchanges the authorization code for tokens,
-    fetches user info from Canvas, creates/updates the user in Supabase, and
-    returns a session JWT.
-    """
+    """Handle Canvas OAuth2 callback; set session cookie; redirect without token in URL."""
     code = request.args.get("code")
     state = request.args.get("state")
     error = request.args.get("error")
@@ -417,27 +594,29 @@ def canvas_oauth_callback():
     if not code:
         return jsonify({"error": "Missing authorization code"}), 400
 
-    # Validate CSRF state
-    with _AUTH_CACHE_LOCK:
-        if state not in _OAUTH_STATE_CACHE:
-            return jsonify({"error": "Invalid or expired OAuth state"}), 400
-        _OAUTH_STATE_CACHE.pop(state, None)
+    signed_ctx = request.cookies.get(OAUTH_CTX_COOKIE_NAME)
+    ctx = _verify_signed_payload(signed_ctx, max_age_seconds=600)
+    if not ctx or ctx.get("state") != state:
+        return jsonify({"error": "Invalid or expired OAuth state"}), 400
 
-    # Exchange code for tokens
+    code_verifier = ctx.get("verifier") or ""
+
     token_response = requests.post(
         f"{CANVAS_INSTANCE_URL}/login/oauth2/token",
+        headers={"User-Agent": CANVASSYNC_USER_AGENT},
         data={
             "grant_type": "authorization_code",
             "code": code,
             "client_id": CANVAS_OAUTH_CLIENT_ID,
             "client_secret": CANVAS_OAUTH_CLIENT_SECRET,
             "redirect_uri": CANVAS_OAUTH_REDIRECT_URI,
+            "code_verifier": code_verifier,
         },
         timeout=15,
     )
 
     if token_response.status_code != 200:
-        logger.error("Canvas token exchange failed: %s", token_response.text)
+        logger.error("Canvas token exchange failed: HTTP %s", token_response.status_code)
         return jsonify({"error": "Failed to exchange authorization code"}), 502
 
     token_data = token_response.json()
@@ -448,15 +627,18 @@ def canvas_oauth_callback():
     if not access_token:
         return jsonify({"error": "No access token received from Canvas"}), 502
 
-    # Fetch user info from Canvas API
     user_response = requests.get(
         f"{CANVAS_INSTANCE_URL}/api/v1/users/self",
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json+canvas-string-ids",
+            "User-Agent": CANVASSYNC_USER_AGENT,
+        },
         timeout=10,
     )
 
     if user_response.status_code != 200:
-        logger.error("Canvas user info fetch failed: %s", user_response.text)
+        logger.error("Canvas user info fetch failed: HTTP %s", user_response.status_code)
         return jsonify({"error": "Failed to fetch user info from Canvas"}), 502
 
     canvas_user = user_response.json()
@@ -467,7 +649,6 @@ def canvas_oauth_callback():
     if not canvas_user_id:
         return jsonify({"error": "Could not determine Canvas user ID"}), 502
 
-    # Create/update user in Supabase
     user_id = f"canvas_{canvas_user_id}"
     resolved_user_id = ensure_user_exists(user_id, email, display_name)
 
@@ -480,7 +661,6 @@ def canvas_oauth_callback():
     except (TypeError, ValueError):
         expires_at = None
 
-    # Persist OAuth credentials so users can sync immediately after OAuth login.
     try:
         update_user_canvas_oauth_credentials(
             resolved_user_id,
@@ -490,56 +670,63 @@ def canvas_oauth_callback():
             expires_at=expires_at,
         )
     except Exception as exc:
-        logger.warning("Unable to persist Canvas OAuth credentials: %s", exc)
+        logger.error("Unable to persist Canvas OAuth credentials: %s", exc)
+        return jsonify({"error": "Failed to store Canvas credentials"}), 502
 
-    # Issue session JWT
-    session_jwt = _issue_session_jwt(resolved_user_id, email, display_name)
-
-    frontend_redirect = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-    return redirect(f"{frontend_redirect}/#token={session_jwt}")
-
-
-def canvas_oauth_refresh():
-    """
-    Refresh Canvas access token using a stored refresh token.
-    Expects JSON body with `refresh_token`.
-    Returns new access and refresh tokens.
-    """
-    data = request.get_json(silent=True) or {}
-    refresh_token = data.get("refresh_token")
-
-    if not refresh_token:
-        return jsonify({"error": "Missing refresh_token"}), 400
-
-    token_response = requests.post(
-        f"{CANVAS_INSTANCE_URL}/login/oauth2/token",
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": CANVAS_OAUTH_CLIENT_ID,
-            "client_secret": CANVAS_OAUTH_CLIENT_SECRET,
-        },
-        timeout=15,
+    session_version = get_user_session_version(resolved_user_id)
+    session_jwt = _issue_session_jwt(
+        resolved_user_id, email, display_name, session_version=session_version
     )
 
-    if token_response.status_code != 200:
-        logger.error("Canvas token refresh failed: %s", token_response.text)
-        return jsonify({"error": "Failed to refresh Canvas token"}), 502
-
-    token_data = token_response.json()
-    return jsonify({
-        "access_token": token_data.get("access_token"),
-        "refresh_token": token_data.get("refresh_token", refresh_token),
-        "expires_in": token_data.get("expires_in"),
-    })
+    frontend_redirect = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    resp = redirect(f"{frontend_redirect}/?oauth=success")
+    set_session_cookie(resp, session_jwt)
+    resp.set_cookie(
+        OAUTH_CTX_COOKIE_NAME,
+        "",
+        httponly=True,
+        secure=_cookie_secure(),
+        samesite="Lax",
+        max_age=0,
+        path="/",
+    )
+    return resp
 
 
 def canvas_oauth_logout():
-    """
-    Logout handler. JWT sessions are stateless so invalidation is client-side.
-    This endpoint confirms logout and can be extended for server-side revocation.
-    """
-    return jsonify({"message": "Logged out successfully"})
+    """Revoke Canvas tokens, invalidate session, clear session cookie."""
+    from canvas_token_service import revoke_canvas_tokens
+
+    canvas_revocation_confirmed = True
+    session_invalidation_confirmed = True
+    token = extract_session_token()
+    if token:
+        payload = _decode_session_jwt(token)
+        if payload and payload.get("sub"):
+            user_id = str(payload["sub"])
+            try:
+                canvas_revocation_confirmed = revoke_canvas_tokens(user_id)
+            except Exception as exc:
+                canvas_revocation_confirmed = False
+                logger.warning("Canvas revoke on logout failed: %s", exc)
+            try:
+                increment_user_session_version(user_id)
+            except Exception as exc:
+                session_invalidation_confirmed = False
+                logger.warning("Session version bump on logout failed: %s", exc)
+
+    status = 200 if session_invalidation_confirmed else 503
+    resp = make_response(jsonify({
+        "message": (
+            "Logged out successfully"
+            if status == 200
+            else "Local cookie cleared, but server-side session invalidation could not be confirmed."
+        ),
+        "canvas_revocation_confirmed": canvas_revocation_confirmed,
+        "session_invalidation_confirmed": session_invalidation_confirmed,
+    }), status)
+    clear_session_cookie(resp)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -547,18 +734,14 @@ def canvas_oauth_logout():
 # ---------------------------------------------------------------------------
 
 def create_dev_token(user_id: str = "dev-user-001", email: str = "dev@localhost", name: str = "Dev User") -> str:
-    """
-    FOR DEVELOPMENT ONLY: Create a session JWT for testing without going
-    through the Canvas OAuth flow.
-    """
     if not SESSION_SECRET_KEY:
         logger.warning("Cannot create dev token: SESSION_SECRET_KEY not set")
         return None
     try:
         ensure_user_exists(user_id, email, name)
     except Exception as e:
-        logger.warning("Dev token user sync skipped for %s: %s", user_id, e)
-    return _issue_session_jwt(user_id, email, name)
+        logger.warning("Development token user sync skipped: %s", type(e).__name__)
+    return _issue_session_jwt(user_id, email, name, session_version=get_user_session_version(user_id))
 
 
 def create_demo_token(
@@ -566,24 +749,25 @@ def create_demo_token(
     email: str = "demo@canvassync.dev",
     name: str = "Demo User",
 ) -> str | None:
-    """Issue a demo session JWT (Supabase user sync is best-effort)."""
     if not SESSION_SECRET_KEY:
         return None
     try:
-        ensure_user_exists(user_id, email, name)
+        from db_supabase import upsert_user_with_id
+        upsert_user_with_id(user_id, email, name)
     except Exception as e:
-        logger.warning("Demo token user sync skipped for %s: %s", user_id, e)
-    return _issue_session_jwt(user_id, email, name, extra_claims={"demo": True})
+        logger.warning("Demo token user sync skipped: %s", type(e).__name__)
+    try:
+        session_version = get_user_session_version(user_id)
+    except Exception as e:
+        logger.warning("Demo session-version lookup skipped: %s", type(e).__name__)
+        session_version = 0
+    return _issue_session_jwt(
+        user_id, email, name, extra_claims={"demo": True},
+        session_version=session_version,
+    )
 
-
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     init_db()
+    validate_production_secrets()
     logger.info("Auth module initialized successfully")
-    if SESSION_SECRET_KEY:
-        token = create_dev_token()
-        if token:
-            logger.info("Dev token: %s", token)
-    else:
-        logger.warning("SESSION_SECRET_KEY not set - cannot issue tokens")

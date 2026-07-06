@@ -1,11 +1,11 @@
+# Vercel serves only the React frontend. Do not upload backend code, local
+# databases, logs, compliance working papers, or editor state in deployment
+# source archives.
 backend/
 data/
-.git/
-.venv/
-*.pyc
-__pycache__/
-node_modules/
-.firebase/
-*.lnk
-*.bak
+docs/
+.cursor/
+*.log
 *.db
+*.db-shm
+*.db-wal

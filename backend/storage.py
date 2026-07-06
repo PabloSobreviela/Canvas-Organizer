@@ -1,9 +1,12 @@
 # Supabase Storage Module
 # Uses Supabase Storage for file uploads/downloads in multi-user deployment
 
+import logging
 import os
 from typing import Optional, List
 from supabase import create_client, Client
+
+logger = logging.getLogger(__name__)
 
 _supabase_client: Optional[Client] = None
 
@@ -75,13 +78,84 @@ def _storage_bucket():
     return get_supabase_client().storage.from_(BUCKET_NAME)
 
 
+def delete_storage_paths(paths: List[str], *, strict: bool = False) -> int:
+    """
+    Delete one or more objects from Supabase Storage by full path within the bucket.
+    Returns the number of paths successfully removed.
+    """
+    if not paths:
+        return 0
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return 0
+    unique = list({p.strip() for p in paths if p and str(p).strip()})
+    if not unique:
+        return 0
+    try:
+        _storage_bucket().remove(unique)
+        return len(unique)
+    except Exception as e:
+        logger.warning("Bulk storage delete failed (%d paths): %s", len(unique), e)
+        deleted = 0
+        for path in unique:
+            try:
+                _storage_bucket().remove([path])
+                deleted += 1
+            except Exception:
+                pass
+        if strict and deleted != len(unique):
+            raise RuntimeError(
+                f"Failed to delete {len(unique) - deleted} private storage object(s)."
+            )
+        return deleted
+
+
+def delete_user_storage(user_id: str, *, strict: bool = False) -> int:
+    """
+    Remove all objects under {user_id}/ in the configured bucket.
+    Used on full account erasure and retention cleanup.
+    """
+    if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return 0
+
+    prefix = f"{user_id}/"
+    to_remove: List[str] = []
+
+    collect_errors: List[str] = []
+
+    def _collect(folder: str):
+        try:
+            entries = _storage_bucket().list(folder)
+        except Exception as e:
+            logger.warning("Storage list failed for %s: %s", folder, e)
+            collect_errors.append(folder)
+            return
+        for entry in entries or []:
+            name = entry.get("name")
+            if not name:
+                continue
+            child = f"{folder}/{name}".replace("//", "/")
+            if entry.get("id"):
+                to_remove.append(child)
+            else:
+                _collect(child)
+
+    _collect(prefix.rstrip("/"))
+    if collect_errors and strict:
+        raise RuntimeError("Could not enumerate all private storage objects.")
+    if not to_remove:
+        return 0
+    removed = delete_storage_paths(to_remove, strict=strict)
+    logger.info("Deleted %d private storage object(s) for one user", removed)
+    return removed
+
+
 def upload_user_file(user_id: str, course_id: str, filename: str, file_content: bytes,
                      subfolder: str = "files") -> str:
     """
     Upload file to Supabase Storage under user's directory.
 
     Args:
-        user_id: Firebase user ID
+        user_id: Internal user UUID
         course_id: Canvas course ID
         filename: Name of the file
         file_content: File content as bytes
@@ -107,7 +181,7 @@ def upload_user_file(user_id: str, course_id: str, filename: str, file_content: 
         {"content-type": content_type},
     )
 
-    print(f"[OK] Uploaded: {BUCKET_NAME}/{storage_path}")
+    logger.info("Uploaded one user file to private storage")
     return storage_path
 
 
@@ -127,7 +201,7 @@ def download_user_file(user_id: str, course_id: str, filename: str,
         data = _storage_bucket().download(storage_path)
         return data
     except Exception as e:
-        print(f"[WARN] File not found or download failed: {BUCKET_NAME}/{storage_path} – {e}")
+        logger.warning("Private storage download failed: %s", type(e).__name__)
         return None
 
 
@@ -146,11 +220,11 @@ def delete_user_file(user_id: str, course_id: str, filename: str,
     try:
         result = _storage_bucket().remove([storage_path])
         if result:
-            print(f"[INFO] Deleted: {BUCKET_NAME}/{storage_path}")
+            logger.info("Deleted one user file from private storage")
             return True
         return False
     except Exception as e:
-        print(f"[WARN] Delete failed: {BUCKET_NAME}/{storage_path} – {e}")
+        logger.warning("Private storage delete failed: %s", type(e).__name__)
         return False
 
 
@@ -172,7 +246,7 @@ def list_user_files(user_id: str, course_id: str, subfolder: str = "files") -> L
             if entry.get("name") and entry.get("id")  # skip folder placeholders
         ]
     except Exception as e:
-        print(f"[WARN] List failed: {BUCKET_NAME}/{folder_path} – {e}")
+        logger.warning("Private storage list failed: %s", type(e).__name__)
         return []
 
 
@@ -196,7 +270,7 @@ def get_signed_url(user_id: str, course_id: str, filename: str,
         result = _storage_bucket().create_signed_url(storage_path, expires_in)
         return result.get("signedURL") or result.get("signedUrl")
     except Exception as e:
-        print(f"[WARN] Signed URL failed: {BUCKET_NAME}/{storage_path} – {e}")
+        logger.warning("Private storage signed-URL creation failed: %s", type(e).__name__)
         return None
 
 

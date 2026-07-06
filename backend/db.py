@@ -191,40 +191,6 @@ def init_db():
         );
     """)
 
-    # -----------------------------
-    # AI usage logs (LLM tokens + estimated cost)
-    # -----------------------------
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ai_usage_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            course_id TEXT,
-            request_id TEXT,
-            operation TEXT,
-            model TEXT,
-            input_tokens INTEGER DEFAULT 0,
-            output_tokens INTEGER DEFAULT 0,
-            total_tokens INTEGER DEFAULT 0,
-            cached_tokens INTEGER DEFAULT 0,
-            estimated_cost_usd REAL DEFAULT 0,
-            currency TEXT DEFAULT 'USD',
-            pricing_source TEXT,
-            status TEXT DEFAULT 'ok',
-            prompt_chars INTEGER DEFAULT 0,
-            is_resync INTEGER,
-            raw_json TEXT,
-            created_at TEXT NOT NULL
-        );
-    """)
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_user_created
-        ON ai_usage_logs (user_id, created_at DESC);
-    """)
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ai_usage_logs_course_created
-        ON ai_usage_logs (course_id, created_at DESC);
-    """)
-
     conn.commit()
     conn.close()
 

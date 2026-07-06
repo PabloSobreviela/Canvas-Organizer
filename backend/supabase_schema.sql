@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS users (
     starred_courses JSONB DEFAULT '{}',
     sync_enabled_courses JSONB DEFAULT '{}',
     completed_items JSONB DEFAULT '{}',
+    legal_consent_at TIMESTAMPTZ,
+    legal_consent_version TEXT,
+    session_version INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     last_login TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -125,32 +128,6 @@ CREATE TABLE IF NOT EXISTS syllabus_rules (
     UNIQUE(user_id, course_id, canvas_credential_key)
 );
 
--- AI usage logs (replaces Firestore 'users/{id}/aiUsageLogs' subcollection)
-CREATE TABLE IF NOT EXISTS ai_usage_logs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    course_id TEXT,
-    request_id TEXT,
-    operation TEXT,
-    model TEXT,
-    input_tokens INT DEFAULT 0,
-    output_tokens INT DEFAULT 0,
-    total_tokens INT DEFAULT 0,
-    cached_tokens INT DEFAULT 0,
-    estimated_cost_usd FLOAT DEFAULT 0,
-    currency TEXT DEFAULT 'USD',
-    pricing_source TEXT DEFAULT 'unconfigured',
-    status TEXT DEFAULT 'ok',
-    prompt_chars INT DEFAULT 0,
-    is_resync BOOLEAN,
-    canvas_credential_key TEXT,
-    raw_json JSONB,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_ai_logs_user ON ai_usage_logs (user_id);
-CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_usage_logs (user_id, created_at DESC);
-
 -- Rate limits (replaces Firestore '_systemRateLimits' collection)
 CREATE TABLE IF NOT EXISTS rate_limits (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -172,19 +149,33 @@ ALTER TABLE assignments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE course_file_texts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE announcements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE syllabus_rules ENABLE ROW LEVEL SECURITY;
-ALTER TABLE ai_usage_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE rate_limits ENABLE ROW LEVEL SECURITY;
 
+-- The Cloud Run backend is the only database client. RLS and object grants are
+-- separate protections, so browser-facing roles receive neither table access
+-- nor an allowing row policy.
+REVOKE ALL ON TABLE users, courses, assignments, course_file_texts, announcements, syllabus_rules, rate_limits
+  FROM anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON TABLE users, courses, assignments, course_file_texts, announcements, syllabus_rules, rate_limits
+  TO service_role;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  REVOKE USAGE, SELECT ON SEQUENCES FROM anon, authenticated;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  REVOKE EXECUTE ON FUNCTIONS FROM anon, authenticated, PUBLIC;
+
 -- RLS policies: backend uses service_role key which bypasses RLS.
--- These policies are for any future direct client access.
-CREATE POLICY "Users can view own data" ON users FOR SELECT USING (true);
-CREATE POLICY "Users can view own courses" ON courses FOR SELECT USING (true);
-CREATE POLICY "Users can view own assignments" ON assignments FOR SELECT USING (true);
-CREATE POLICY "Users can view own file texts" ON course_file_texts FOR SELECT USING (true);
-CREATE POLICY "Users can view own announcements" ON announcements FOR SELECT USING (true);
-CREATE POLICY "Users can view own syllabus rules" ON syllabus_rules FOR SELECT USING (true);
-CREATE POLICY "Users can view own ai logs" ON ai_usage_logs FOR SELECT USING (true);
-CREATE POLICY "Service can manage rate limits" ON rate_limits FOR ALL USING (true);
+-- Deny direct anon/authenticated access; see migrations/002_fix_rls.sql for upgrades.
+CREATE POLICY "deny_direct_users" ON users FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_courses" ON courses FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_assignments" ON assignments FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_course_file_texts" ON course_file_texts FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_announcements" ON announcements FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_syllabus_rules" ON syllabus_rules FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
+CREATE POLICY "deny_direct_rate_limits" ON rate_limits FOR ALL TO anon, authenticated USING (false) WITH CHECK (false);
 
 -- Create storage bucket for course files
 INSERT INTO storage.buckets (id, name, public) VALUES ('course-files', 'course-files', false)

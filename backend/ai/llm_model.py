@@ -3,21 +3,28 @@ import json
 import re
 import pytz
 from datetime import datetime
-from ai.usage_telemetry import build_usage_payload, emit_usage_log, mark_usage_error
 
-# Primary provider: OpenRouter
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen/qwen3.5-flash-02-23")
+# Direct DeepInfra inference. No gateway or alternate-provider fallback exists.
+APPROVED_DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+APPROVED_DEEPINFRA_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", APPROVED_DEEPINFRA_BASE_URL).rstrip("/")
+MODEL_NAME = os.getenv("MODEL_NAME", APPROVED_DEEPINFRA_MODEL).strip()
 
-# Fallback provider: DeepInfra
-LLM_FALLBACK_API_KEY = os.getenv("LLM_FALLBACK_API_KEY", "")
-LLM_FALLBACK_BASE_URL = os.getenv("LLM_FALLBACK_BASE_URL", "https://api.deepinfra.com/v1/openai")
-FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "Qwen/Qwen3-14B")
+# Requests fail rather than silently route to another provider or model.
 
-AI_DEBUG = (os.getenv("AI_DEBUG") or "").strip().lower() in ("1", "true", "yes")
+
+def _env_bool(name: str, default: str) -> bool:
+    return (os.getenv(name, default) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+AI_DEBUG = _env_bool("AI_DEBUG", "")
+
+# Deterministic structured-extraction settings (no max_tokens cap — use provider default).
+AI_TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.1"))
+AI_TOP_P = float(os.getenv("AI_TOP_P", "0.9"))
+
 
 _primary_client = None
-_fallback_client = None
 
 
 def _clean_secret(value: str) -> str:
@@ -26,20 +33,18 @@ def _clean_secret(value: str) -> str:
 
 
 def _resolve_llm_api_key() -> str:
-    """Accept common env var names; ignore template placeholders."""
-    for name in ("LLM_API_KEY", "OPENROUTER_API_KEY", "LAMBDA_API_KEY"):
-        value = _clean_secret(os.getenv(name))
-        if not value or value == "your-openrouter-api-key":
-            continue
-        return value
-    return ""
+    """Resolve only a dedicated direct DeepInfra credential."""
+    value = _clean_secret(os.getenv("DEEPINFRA_API_KEY"))
+    if not value or value in {"your-deepinfra-api-key", "your-api-key"}:
+        return ""
+    return value
 
 
 LLM_API_KEY = _resolve_llm_api_key()
 
 
 def _get_primary_client():
-    """Lazily create an OpenAI client for OpenRouter."""
+    """Lazily create an OpenAI-compatible client for direct DeepInfra inference."""
     global _primary_client
     if _primary_client is not None:
         return _primary_client
@@ -48,46 +53,64 @@ def _get_primary_client():
 
     if not LLM_API_KEY:
         raise RuntimeError(
-            "LLM_API_KEY is not set. "
-            "Configure your OpenRouter API key in .env or Cloud Run environment variables."
+            "DEEPINFRA_API_KEY is not set. "
+            "Configure a direct DeepInfra API key in Secret Manager."
+        )
+    if LLM_BASE_URL != APPROVED_DEEPINFRA_BASE_URL:
+        raise RuntimeError(
+            f"LLM_BASE_URL must be the approved direct DeepInfra endpoint: "
+            f"{APPROVED_DEEPINFRA_BASE_URL}"
+        )
+    if MODEL_NAME != APPROVED_DEEPINFRA_MODEL:
+        raise RuntimeError(
+            f"MODEL_NAME must be the approved DeepInfra model: "
+            f"{APPROVED_DEEPINFRA_MODEL}"
         )
 
     _primary_client = OpenAI(
         api_key=LLM_API_KEY,
         base_url=LLM_BASE_URL,
     )
-    print(f"[OK] Primary LLM client initialized: {LLM_BASE_URL} (Model: {MODEL_NAME})")
+    print(f"[OK] Direct DeepInfra client initialized (Model: {MODEL_NAME})")
     return _primary_client
 
 
-def _get_fallback_client():
-    """Lazily create an OpenAI client for the fallback provider (DeepInfra)."""
-    global _fallback_client
-    if _fallback_client is not None:
-        return _fallback_client
-
-    from openai import OpenAI
-
-    if not LLM_FALLBACK_API_KEY:
-        return None
-
-    _fallback_client = OpenAI(
-        api_key=LLM_FALLBACK_API_KEY,
-        base_url=LLM_FALLBACK_BASE_URL,
-    )
-    print(f"[OK] Fallback LLM client initialized: {LLM_FALLBACK_BASE_URL} (Model: {FALLBACK_MODEL})")
-    return _fallback_client
+def _response_to_text(response, target_model: str) -> str:
+    choices = getattr(response, "choices", None) or []
+    if not choices or not getattr(choices[0], "message", None):
+        raise RuntimeError(
+            f"LLM returned no choices (model={getattr(response, 'model', target_model)})."
+        )
+    return (choices[0].message.content or "").strip()
 
 
-def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operation: str = "unknown"):
+def _is_parseable_json(text: str) -> bool:
+    try:
+        _extract_first_json(text)
+        return True
+    except Exception:
+        return False
+
+
+def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operation: str = "unknown",
+              expect_json: bool = True):
     """
-    Send a chat-completion request via the primary provider.
-    On failure, retries against the fallback provider with a different model.
+    Send a chat-completion request directly to DeepInfra.
+
+    If the response is not valid JSON, retry exactly once against the SAME
+    model with stricter formatting instructions.
     """
     from openai import APIError, APIConnectionError, APITimeoutError, RateLimitError
+    from ai.prompt_sanitizer import sanitize_text_for_llm
+    import time
 
     client = _get_primary_client()
     target_model = model or MODEL_NAME
+    if target_model != APPROVED_DEEPINFRA_MODEL:
+        raise RuntimeError(
+            f"AI model override rejected; only {APPROVED_DEEPINFRA_MODEL} is approved."
+        )
+    prompt = sanitize_text_for_llm(prompt)
 
     messages = [
         {"role": "system", "content": "You are an expert academic schedule extraction system. Respond with valid JSON only."},
@@ -96,62 +119,49 @@ def _call_llm(prompt: str, *, model: str = None, telemetry_context=None, operati
     params = dict(
         model=target_model,
         messages=messages,
-        max_tokens=4096,
-        temperature=0.2,
-        top_p=0.95,
-        # OpenRouter: thinking.type=disabled still bills reasoning tokens on Qwen 3.5.
-        extra_body={"reasoning": {"effort": "none"}},
+        temperature=AI_TEMPERATURE,
+        top_p=AI_TOP_P,
+        response_format={"type": "json_object"},
     )
 
-    telemetry = dict(telemetry_context or {})
-    telemetry.setdefault("llm_provider", "openrouter")
+    def _create(call_params):
+        """One logical call with bounded retry on rate limits; no provider switch."""
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                return client.chat.completions.create(**call_params)
+            except RateLimitError as e:
+                last_error = e
+                if attempt >= 3:
+                    raise
+                backoff = min(20.0, 2.0 * attempt)
+                print(f"[WARN] LLM rate limited (attempt {attempt}/3); retrying in {backoff:.0f}s")
+                time.sleep(backoff)
+            except (APIError, APIConnectionError, APITimeoutError) as e:
+                raise e
+        if last_error is not None:
+            raise last_error
 
-    import time
+    response = _create(params)
+    raw_text = _response_to_text(response, target_model)
 
-    last_error = None
-    for attempt in range(1, 4):
-        try:
-            response = client.chat.completions.create(**params)
-            last_error = None
-            break
-        except RateLimitError as e:
-            last_error = e
-            if attempt >= 3:
-                raise
-            backoff = min(20.0, 2.0 * attempt)
-            print(f"[WARN] LLM rate limited (attempt {attempt}/3); retrying in {backoff:.0f}s")
-            time.sleep(backoff)
-        except (APIError, APIConnectionError, APITimeoutError) as e:
-            last_error = e
-            break
+    json_retry = False
+    if expect_json and not _is_parseable_json(raw_text):
+        json_retry = True
+        print("[WARN] LLM response was not valid JSON; retrying once with stricter instructions (same model/provider).")
+        strict_params = dict(params)
+        strict_params["messages"] = messages + [
+            {"role": "assistant", "content": raw_text[:1000]},
+            {"role": "user", "content": (
+                "Your previous response was not valid JSON. Respond again with ONLY a single "
+                "minified JSON object — no prose, no explanations, no markdown, no code fences. "
+                "Start with '{' and end with '}'."
+            )},
+        ]
+        response = _create(strict_params)
+        raw_text = _response_to_text(response, target_model)
 
-    if last_error is not None:
-        e = last_error
-        fallback_client = _get_fallback_client()
-        if fallback_client and FALLBACK_MODEL:
-            print(f"[WARN] Primary ({target_model}) failed: {e}; falling back to {FALLBACK_MODEL}")
-            params["model"] = FALLBACK_MODEL
-            params.pop("extra_body", None)
-            response = fallback_client.chat.completions.create(**params)
-            telemetry["llm_provider"] = "deepinfra"
-        else:
-            raise
-
-    choices = getattr(response, "choices", None) or []
-    if not choices or not getattr(choices[0], "message", None):
-        raise RuntimeError(
-            f"LLM returned no choices (model={getattr(response, 'model', target_model)})."
-        )
-
-    raw_text = (choices[0].message.content or "").strip()
-    usage_payload = build_usage_payload(
-        response,
-        model_name=response.model or target_model,
-        operation=operation,
-        telemetry_context=telemetry,
-        prompt_chars=len(prompt),
-    )
-    return raw_text, usage_payload
+    return raw_text
 
 
 def _extract_first_json(value: str):
@@ -407,110 +417,48 @@ def resolve_assignment_dates_with_llm(
         tail_fraction=float(os.getenv("AI_FILE_TAIL_FRACTION", "0.65")),
     )
 
-    full_prompt = f"""<role>You are an expert academic schedule extraction system. Your ONLY job is to extract assignment deadlines with 100% date accuracy.</role>
+    canvas_json = json.dumps([{
+        "cid": a["canvas_assignment_id"],
+        "nam": a["name"],
+        "due": a["ai_ready_date"],
+    } for a in clean_assignments], ensure_ascii=False, separators=(",", ":"))
 
-<context>
-- Today's date: {today_str}
-- Course timezone: {tz_name}
-- All Canvas dates have ALREADY been converted to local {tz_name} time
-</context>
+    materials_json = json.dumps({
+        "announcements": [{
+            "title": a.get("title"),
+            "posted_at": a.get("posted_at"),
+            "message": (a.get("message") or "")[:max_announcement_chars],
+        } for a in (announcements[:5] if announcements else [])],
+        "files": [{
+            "file_name": f.get("file_name", ""),
+            "file_type": f.get("file_type", ""),
+            "text": (f.get("text", "") or ""),
+        } for f in files_payload],
+    }, ensure_ascii=False, separators=(",", ":"))
 
-<rules>
-RULE 1 - COPY CANVAS DATES EXACTLY:
-- If a Canvas item has a date like "2026-01-20", output EXACTLY "2026-01-20"
-- NEVER change, shift, or modify Canvas dates
-- Canvas dates are pre-converted and correct
+    full_prompt = f"""Extract assignment due dates with 100% date accuracy. Output minified JSON only.
+ctx: today={today_str}; tz={tz_name}; Canvas dates already in local {tz_name}.
 
-RULE 2 - FILL IN MISSING DATES (CRITICAL FOR QUIZZES):
-- Every Canvas item with "No Date" MUST be checked against the syllabus. If a date exists, use it.
-- Quizzes often have dates in schedule tables — search for "Quiz 1", "Quiz 2", "Q1", "Q2", etc. and match by number.
-- Extract dates EXACTLY as written (e.g., "January 20" -> "2026-01-20", "Jan 20" -> "2026-01-20")
-- Do NOT leave any Canvas item with "No Date" if the syllabus contains its date. Be thorough.
+RULES:
+1 COPY Canvas dates verbatim; never shift/modify them.
+2 FILL every Canvas "No Date" item from the materials. Match by number across name variants: Quiz 1=Q1, "Webwork HW 03"=HW3=HW 3=Homework 3, Midterm 1=Exam 1. Search schedule tables. Convert written dates exactly ("Jan 20","January 20"->"2026-01-20"). Leave "No Date" ONLY if truly absent.
+3 DISCOVER: add a materials-only item (no cid) ONLY if NO Canvas item matches it by name/number.
+4 DEDUPE (strict): exactly one row per assignment. If a Canvas item matches, output ONLY its cid row; NEVER add a second cid-less row. "Exam 3"="Exam 3 Su24 Key"="Test 3"; "HW1"="HW 1"="Homework 1".
+5 CATEGORY: EXAM=exam/midterm/final/test/quiz; ASSIGNMENT=homework/hw/lab/project. SKIP attendance/participation/lecture/reading/chapter/total.
 
-RULE 3 - SYLLABUS-ONLY DISCOVERY:
-- ONLY add syllabus items that have NO matching Canvas item
-- If syllabus says "Due Jan 20" and it's Spring 2026, output "2026-01-20"
+EXAMPLE:
+Canvas:[{{"cid":100,"nam":"HW1","due":"No Date"}},{{"cid":101,"nam":"Quiz 2","due":"No Date"}}] Materials:"HW1 due Jan 15. Quiz 2 Feb 12. Final Mar 20."
+->{{"cc":"CS101","a":[{{"cid":100,"nam":"HW1","due":"2026-01-15","cat":"ASSIGNMENT"}},{{"cid":101,"nam":"Quiz 2","due":"2026-02-12","cat":"EXAM"}},{{"nam":"Final","due":"2026-03-20","cat":"EXAM"}}]}}
 
-RULE 4 - CRITICAL DEDUPLICATION (NO EXCEPTIONS):
-- If a Canvas item exists for an assignment, output ONLY the Canvas version with its cid. NEVER output a separate discovered entry.
-- "Exam 3" = "Exam 3 Su24 Key" = "Quiz 3" = "Test 3" (same assignment when number matches)
-- "HW1" = "HW 1" = "Homework 1" = "HW01" (same assignment)
-- When syllabus mentions something that matches a Canvas item by name/number, output ONLY the Canvas row with cid — do NOT add a second row without cid.
-- File names like "Exam 3 Su24 Key.pdf" refer to the same "Exam 3" in Canvas — merge into the Canvas item, never create a duplicate.
+CANVAS:{canvas_json}
+MATERIALS:{materials_json}
 
-RULE 5 - CATEGORIES:
-- EXAM: exam, midterm, final, test, quiz (quizzes are deliverables — include them with dates)
-- ASSIGNMENT: homework, hw, lab, project, assignment
-- SKIP: attendance, participation, lecture, reading, chapter, total
-</rules>
-
-<few_shot_examples>
-EXAMPLE 1:
-INPUT:
-Canvas: [{{"cid": 100, "nam": "HW1", "due": "2026-01-15"}}, {{"cid": 101, "nam": "Midterm", "due": "No Date"}}]
-Syllabus: "HW 1 due Jan 15. Midterm Feb 10. Final Exam March 20."
-
-OUTPUT:
-{{"cc": "CS101", "a": [
-  {{"cid": 100, "nam": "HW1", "due": "2026-01-15", "cat": "ASSIGNMENT"}},
-  {{"cid": 101, "nam": "Midterm", "due": "2026-02-10", "cat": "EXAM"}},
-  {{"nam": "Final Exam", "due": "2026-03-20", "cat": "EXAM"}}
-]}}
-
-EXAMPLE 2 (QUIZZES — fill ALL dates from syllabus):
-INPUT:
-Canvas: [{{"cid": 200, "nam": "Quiz 1", "due": "No Date"}}, {{"cid": 201, "nam": "Quiz 2", "due": "No Date"}}, {{"cid": 202, "nam": "Quiz 3", "due": "No Date"}}]
-Syllabus: "Schedule: Quiz 1 Jan 15, Quiz 2 Feb 12, Quiz 3 Mar 5."
-
-OUTPUT:
-{{"cc": "MATH101", "a": [
-  {{"cid": 200, "nam": "Quiz 1", "due": "2026-01-15", "cat": "EXAM"}},
-  {{"cid": 201, "nam": "Quiz 2", "due": "2026-02-12", "cat": "EXAM"}},
-  {{"cid": 202, "nam": "Quiz 3", "due": "2026-03-05", "cat": "EXAM"}}
-]}}
-
-BAD: If Canvas has "Exam 3" and syllabus has "Exam 3 Su24 Key.pdf", output ONLY {{"cid": 102, "nam": "Exam 3", ...}} — do NOT add {{"nam": "Exam 3 Su24 Key", ...}} as a separate row.
-</few_shot_examples>
-
-<input_data>
-<canvas_assignments>
-{json.dumps([{
-    "cid": a["canvas_assignment_id"],
-    "nam": a["name"],
-    "due": a["ai_ready_date"]
-} for a in clean_assignments], ensure_ascii=False, indent=2)}
-</canvas_assignments>
-
-<syllabus_materials>
-{json.dumps({
-    "announcements": [{
-        "title": a.get("title"),
-        "posted_at": a.get("posted_at"),
-        "message": (a.get("message") or "")[:max_announcement_chars],
-    } for a in (announcements[:5] if announcements else [])],
-    "files": [{
-        "file_name": f.get("file_name", ""),
-        "file_type": f.get("file_type", ""),
-        "text": (f.get("text", "") or "")
-    } for f in files_payload]
-}, ensure_ascii=False, indent=2)}
-</syllabus_materials>
-</input_data>
-
-<output_format>
-Return ONLY valid JSON with this exact structure:
-{{"cc": "COURSE_CODE", "a": [
-  {{"cid": NUMBER_OR_NULL, "nam": "NAME", "due": "YYYY-MM-DD", "cat": "EXAM|ASSIGNMENT"}}
-]}}
-
-CRITICAL:
-- Every Canvas item (with cid) MUST appear in the output. Do not omit any.
-- Every "due" field MUST be exactly YYYY-MM-DD format. Nothing else.
-- For Canvas items with "No Date", search the syllabus thoroughly (including schedule tables) and fill in the date if found.
-</output_format>"""
+OUTPUT: minified JSON only (no spaces, no newlines, no prose), schema:
+{{"cc":"CODE","a":[{{"cid":NUM_or_null,"nam":"NAME","due":"YYYY-MM-DD","cat":"EXAM|ASSIGNMENT"}}]}}
+Every Canvas cid MUST appear exactly once. Every "due" MUST be exactly YYYY-MM-DD."""
 
     # --- STEP 4: CALL LLM ---
-    raw_text, usage_payload = _call_llm(
+    raw_text = _call_llm(
         full_prompt,
         operation="resolve_assignment_dates",
         telemetry_context=telemetry_context,
@@ -520,8 +468,7 @@ CRITICAL:
         parsed = _extract_first_json(raw_text)
 
         if isinstance(parsed, list):
-            emit_usage_log(usage_payload)
-            return {"cc": "UNK", "a": parsed, "_usage": usage_payload}
+            return {"cc": "UNK", "a": parsed}
 
         assign_list = parsed.get("a") or parsed.get("assignments") or []
 
@@ -573,12 +520,9 @@ CRITICAL:
             final_list.append(r)
 
         parsed["a"] = final_list
-        emit_usage_log(usage_payload)
-        parsed["_usage"] = usage_payload
         return parsed
 
     except Exception as e:
-        emit_usage_log(mark_usage_error(usage_payload, e))
         detail = f"LLM JSON parse failed: {type(e).__name__}: {e}"
         if AI_DEBUG:
             detail += f"\nRaw output head: {raw_text[:400]}"
@@ -715,103 +659,57 @@ def resync_assignment_dates_with_llm(
         tail_fraction=float(os.getenv("AI_FILE_TAIL_FRACTION", "0.65")),
     )
 
-    full_prompt = f"""<role>You are an expert academic schedule RESYNC system. Your job is to UPDATE an existing assignment list with 100% date accuracy.</role>
+    canvas_json = json.dumps([{
+        "cid": a["canvas_assignment_id"],
+        "nam": a["name"],
+        "due": a["ai_ready_date"],
+    } for a in clean_canvas], ensure_ascii=False, separators=(",", ":"))
 
-<context>
-- Today's date: {today_str}
-- Course timezone: {tz_name}
-- All dates have ALREADY been converted to local {tz_name} time
-</context>
+    existing_json = json.dumps(existing_discovered, ensure_ascii=False, separators=(",", ":"))
 
-<rules>
-RULE 1 - PRESERVE EXISTING DATA:
-- Existing items are CORRECT unless you have clear evidence otherwise
-- Canvas dates are authoritative - copy them exactly
-- Discovered items from syllabus should be preserved
+    prev_materials_json = json.dumps([{
+        "file_name": item.get("file_name", ""),
+        "file_type": item.get("file_type", ""),
+        "text": (item.get("text", "") or ""),
+    } for item in prev_files_payload], ensure_ascii=False, separators=(",", ":"))
 
-RULE 2 - COPY DATES EXACTLY / FILL MISSING:
-- If Canvas shows "2026-01-20", output EXACTLY "2026-01-20"
-- NEVER change, shift, or modify existing dates
-- For Canvas items with "No Date", search the syllabus/schedule for quiz and exam dates — fill them in when found (Quiz 1, Quiz 2, etc. by number)
+    new_materials_json = json.dumps([{
+        "file_name": item.get("file_name", ""),
+        "file_type": item.get("file_type", ""),
+        "text": (item.get("text", "") or ""),
+    } for item in new_files_payload], ensure_ascii=False, separators=(",", ":"))
 
-RULE 3 - ACTIONS:
-- CANVAS: Fresh Canvas item (has 'cid') - use as authoritative
-- KEEP: Preserve existing discovered item unchanged
-- ADD: New item found in syllabus/materials that wasn't there before (ONLY if allowed below)
-- UPDATE: A discovered item exists but the new materials clearly correct/clarify its due date
-- SKIP items: attendance, participation, lecture, reading, chapter, total
-- NEVER use action=ADD for an item that matches a Canvas item. "Exam 3 Su24 Key" = "Exam 3" in Canvas — do NOT add as separate entry.
+    announcements_json = json.dumps([{
+        "title": a.get("title"),
+        "posted_at": a.get("posted_at"),
+        "message": (a.get("message") or "")[:max_announcement_chars],
+    } for a in (announcements[:5] if announcements else [])], ensure_ascii=False, separators=(",", ":"))
 
-RULE 4 - CATEGORIES:
-- EXAM: exam, midterm, final, test, quiz
-- ASSIGNMENT: homework, hw, lab, project, assignment
+    full_prompt = f"""RESYNC an existing assignment list with 100% date accuracy. Output minified JSON only.
+ctx: today={today_str}; tz={tz_name}; dates already in local {tz_name}. allow_additions={str(allow_additions).lower()}.
 
-RULE 5 - ADDITIONS POLICY:
-- allow_additions = {str(allow_additions).lower()}
-- If allow_additions is false: NEVER output action="ADD"
-</rules>
+RULES:
+1 PRESERVE existing items unless new materials give clear contrary evidence. Canvas dates are authoritative; copy verbatim, never shift.
+2 FILL every Canvas "No Date" item from materials. Match by number across name variants: Quiz 1=Q1, "Webwork HW 03"=HW3=Homework 3, Midterm 1=Exam 1. Search schedule tables. Convert written dates exactly ("Jan 20"->"2026-01-20").
+3 ACTION per row: CANVAS=fresh Canvas item (has cid, authoritative); KEEP=existing discovered, unchanged; UPDATE=discovered whose date new materials clearly correct; ADD=new materials-only item. If allow_additions=false, NEVER output ADD. NEVER ADD an item matching a Canvas item ("Exam 3 Su24 Key"="Exam 3").
+4 CATEGORY: EXAM=exam/midterm/final/test/quiz; ASSIGNMENT=homework/hw/lab/project. SKIP attendance/participation/lecture/reading/chapter/total.
 
-<few_shot_example>
-INPUT:
-Canvas: [{{"cid": 100, "nam": "HW1", "due": "2026-01-15"}}]
-Existing Discovered: [{{"nam": "Midterm", "due": "2026-02-10", "cat": "EXAM"}}]
+EXAMPLE:
+Canvas:[{{"cid":100,"nam":"HW1","due":"2026-01-15"}}] ExistingDiscovered:[{{"nam":"Midterm","due":"2026-02-10","cat":"EXAM"}}]
+->{{"cc":"CS101","changes_summary":"Preserved existing","a":[{{"cid":100,"nam":"HW1","due":"2026-01-15","cat":"ASSIGNMENT","action":"CANVAS"}},{{"nam":"Midterm","due":"2026-02-10","cat":"EXAM","action":"KEEP"}}]}}
 
-OUTPUT:
-{{"cc": "CS101", "changes_summary": "Preserved all existing items", "a": [
-  {{"cid": 100, "nam": "HW1", "due": "2026-01-15", "cat": "ASSIGNMENT", "action": "CANVAS"}},
-  {{"nam": "Midterm", "due": "2026-02-10", "cat": "EXAM", "action": "KEEP"}}
-]}}
-</few_shot_example>
+CANVAS:{canvas_json}
+EXISTING_DISCOVERED:{existing_json}
+MATERIALS_PREVIOUS:{prev_materials_json}
+MATERIALS_NEW:{new_materials_json}
+ANNOUNCEMENTS:{announcements_json}
 
-<input_data>
-<canvas_assignments>
-{json.dumps([{
-    "cid": a["canvas_assignment_id"],
-    "nam": a["name"],
-    "due": a["ai_ready_date"]
-} for a in clean_canvas], ensure_ascii=False, indent=2)}
-</canvas_assignments>
-
-<existing_discovered>
-{json.dumps(existing_discovered, ensure_ascii=False, indent=2)}
-</existing_discovered>
-
-<materials_previous>
-{json.dumps([{
-    "file_name": item.get("file_name", ""),
-    "file_type": item.get("file_type", ""),
-    "text": (item.get("text", "") or "")
-} for item in prev_files_payload], ensure_ascii=False, indent=2)}
-</materials_previous>
-
-<materials_new>
-{json.dumps([{
-    "file_name": item.get("file_name", ""),
-    "file_type": item.get("file_type", ""),
-    "text": (item.get("text", "") or "")
-} for item in new_files_payload], ensure_ascii=False, indent=2)}
-</materials_new>
-
-<announcements>
-{json.dumps([{
-    "title": a.get("title"),
-    "posted_at": a.get("posted_at"),
-    "message": (a.get("message") or "")[:max_announcement_chars],
-} for a in (announcements[:5] if announcements else [])], ensure_ascii=False, indent=2)}
-</announcements>
-</input_data>
-
-<output_format>
-Return ONLY valid JSON:
-{{"cc": "CODE", "changes_summary": "BRIEF_SUMMARY", "a": [
-  {{"cid": NUMBER_OR_NULL, "nam": "NAME", "due": "YYYY-MM-DD", "cat": "EXAM|ASSIGNMENT", "action": "CANVAS|KEEP|UPDATE|ADD"}}
-]}}
-
-CRITICAL: Every "due" field MUST be exactly YYYY-MM-DD format. Nothing else.
-</output_format>"""
+OUTPUT: minified JSON only (no spaces, no newlines, no prose), schema:
+{{"cc":"CODE","changes_summary":"BRIEF","a":[{{"cid":NUM_or_null,"nam":"NAME","due":"YYYY-MM-DD","cat":"EXAM|ASSIGNMENT","action":"CANVAS|KEEP|UPDATE|ADD"}}]}}
+Every "due" MUST be exactly YYYY-MM-DD."""
 
     # --- STEP 4: CALL LLM ---
-    raw_text, usage_payload = _call_llm(
+    raw_text = _call_llm(
         full_prompt,
         operation="resync_assignment_dates",
         telemetry_context=telemetry_context,
@@ -819,16 +717,13 @@ CRITICAL: Every "due" field MUST be exactly YYYY-MM-DD format. Nothing else.
     
     try:
         parsed = _extract_first_json(raw_text)
-        
+
         if isinstance(parsed, list):
-            emit_usage_log(usage_payload)
-            return {"cc": "UNK", "a": parsed, "changes_summary": "Unknown", "_usage": usage_payload}
+            return {"cc": "UNK", "a": parsed, "changes_summary": "Unknown"}
         
         assign_list = parsed.get("a") or parsed.get("assignments") or []
         changes_summary = parsed.get("changes_summary", "No summary provided")
         canvas_names_resync = [str(a.get("name") or a.get("nam") or "").strip() for a in clean_canvas if a.get("name") or a.get("nam")]
-        
-        print(f"[RESYNC] AI changes summary: {changes_summary}")
         
         final_list = []
         for r in assign_list:
@@ -852,7 +747,6 @@ CRITICAL: Every "due" field MUST be exactly YYYY-MM-DD format. Nothing else.
             action = r.get("action", "KEEP").upper()
             
             if action == "REMOVE":
-                print(f"[RESYNC] Removing: {r.get('nam')} - {r.get('reason', 'No reason')}")
                 continue
             
             due = r.get("due") or r.get("normalized_due_at")
@@ -872,23 +766,14 @@ CRITICAL: Every "due" field MUST be exactly YYYY-MM-DD format. Nothing else.
             if not r.get("cid") and canvas_names_resync and _discovered_matches_canvas_item(
                 r.get("nam") or r.get("name") or "", canvas_names_resync
             ):
-                print(f"[RESYNC] Skipping duplicate of Canvas item: {r.get('nam')}")
                 continue
-            
-            if action == "UPDATE":
-                print(f"[RESYNC] Updating: {r.get('nam')} - {r.get('reason', 'No reason')}")
-            elif action == "ADD":
-                print(f"[RESYNC] Adding new: {r.get('nam')}")
             
             final_list.append(r)
 
         parsed["a"] = final_list
-        emit_usage_log(usage_payload)
-        parsed["_usage"] = usage_payload
         return parsed
         
     except Exception as e:
-        emit_usage_log(mark_usage_error(usage_payload, e))
         detail = f"LLM RESYNC JSON parse failed: {type(e).__name__}: {e}"
         if AI_DEBUG:
             detail += f"\nRaw output head: {raw_text[:400]}"

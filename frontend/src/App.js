@@ -1,24 +1,64 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { ChevronLeft, ChevronRight, Calendar, List, CheckCircle2, Circle, User, X, Menu, Filter, Palette, Settings2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Calendar,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Circle,
+  Download,
+  Filter,
+  List,
+  Loader2,
+  Menu,
+  Palette,
+  RefreshCw,
+  Settings2,
+  Trash2,
+  User,
+  X,
+} from "lucide-react";
 import {
   signInWithCanvas,
   logout,
   onAuthChange,
-  getAuthToken,
   getDemoToken,
   initAuth,
   storeDemoSession,
   purgeDemoAuthArtifacts,
+  apiFetchOptions,
+  isAuthenticated,
 } from './auth';
 import { API_BASE } from "./config";
-// Legacy firebase.js kept as reference; all auth now uses auth.js (Canvas OAuth)
+import { ConsentModal } from "./components/ConsentModal";
+import { LegalFooter } from "./components/LegalFooter";
+import { MobileNotice } from "./components/MobileNotice";
 import { sileo, Toaster } from "sileo";
-import "sileo/styles.css";
 
 // GT-first default timezone, overridable for future non-GT tenants.
 const COURSE_TIMEZONE = process.env.REACT_APP_DEFAULT_COURSE_TIMEZONE || "America/New_York";
-const ENABLE_MANUAL_TOKEN_CONNECT =
-  (process.env.REACT_APP_ENABLE_MANUAL_TOKEN_CONNECT || "").trim().toLowerCase() === "true";
+const SHOW_PILOT_BANNER =
+  (process.env.REACT_APP_SHOW_PILOT_BANNER || "").trim().toLowerCase() === "true";
+
+async function fetchLegalConsentStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/me`, apiFetchOptions());
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data.legal_consent_accepted) && data.legal_consent_current !== false;
+  } catch {
+    return false;
+  }
+}
+
+function PilotBanner() {
+  if (!SHOW_PILOT_BANNER) return null;
+  return (
+    <div className="shrink-0 bg-amber-950/80 border-b border-amber-900/60 px-4 py-2 text-center text-xs text-amber-200">
+      <strong>Student preview.</strong> CanvasSync is not an official Georgia Tech service. Verify deadlines in Canvas.
+    </div>
+  );
+}
 
 function BrandWordmark({ className = "", height = 26 }) {
   return (
@@ -33,82 +73,144 @@ function BrandWordmark({ className = "", height = 26 }) {
 }
 
 const LANDING_DEMO_ITEMS = [
-  { id: "d1", courseCode: "MATH", name: "Homework 4", due: "Mon 11:59pm", day: "Mon", category: "ASSIGNMENT", color: "#3b82f6", source: "from module file" },
-  { id: "d2", courseCode: "MATH", name: "Problem Set 2", due: "Mon 11:59pm", day: "Mon", category: "ASSIGNMENT", color: "#3b82f6", source: "from syllabus" },
-  { id: "d3", courseCode: "CS", name: "Quiz 2", due: "Wed 2:00pm", day: "Wed", category: "EXAM", color: "#22c55e", source: "from announcement" },
-  { id: "d4", courseCode: "CS", name: "Lab 3", due: "Wed 11:59pm", day: "Wed", category: "ASSIGNMENT", color: "#22c55e", source: "from module" },
-  { id: "d5", courseCode: "PHYS", name: "Lab Report", due: "Thu 5:00pm", day: "Thu", category: "ASSIGNMENT", color: "#ef4444", source: "from syllabus page" },
-  { id: "d6", courseCode: "PHYS", name: "Reading Ch. 4", due: "Thu 11:59pm", day: "Thu", category: "READING", color: "#ef4444", source: "from module" },
+  {
+    id: "d1",
+    courseCode: "CS 1331",
+    name: "Project checkpoint",
+    due: "11:59 PM",
+    day: "Today",
+    date: "Jun 7",
+    category: "ASSIGNMENT",
+    color: "#22c55e",
+    urgency: "Today",
+    sourcePills: [{ label: "Canvas", tone: "canvas" }],
+  },
+  {
+    id: "d2",
+    courseCode: "MATH 2552",
+    name: "Problem set 4",
+    due: "8:00 PM",
+    day: "Today",
+    date: "Jun 7",
+    category: "ASSIGNMENT",
+    color: "#3b82f6",
+    urgency: "Review date",
+    sourcePills: [{ label: "From materials", tone: "materials" }, { label: "Review date", tone: "review" }],
+  },
+  {
+    id: "d3",
+    courseCode: "PHYS 2211",
+    name: "Lab report",
+    due: "5:00 PM",
+    day: "Tomorrow",
+    date: "Jun 8",
+    category: "ASSIGNMENT",
+    color: "#ef4444",
+    urgency: "Tomorrow",
+    sourcePills: [{ label: "From materials", tone: "materials" }, { label: "Date updated", tone: "updated" }],
+  },
+  {
+    id: "d4",
+    courseCode: "HIST 2112",
+    name: "Primary source response",
+    due: "Done",
+    day: "Tomorrow",
+    date: "Jun 8",
+    category: "ASSIGNMENT",
+    color: "#f59e0b",
+    completed: true,
+    sourcePills: [{ label: "Canvas", tone: "canvas" }],
+  },
 ];
 
 function LandingDemoSquare() {
-  const [completed, setCompleted] = useState(() => new Set(["d1", "d2", "d3", "d4"]));
+  const [completed, setCompleted] = useState(() => new Set(LANDING_DEMO_ITEMS.filter((item) => item.completed).map((item) => item.id)));
   const toggle = (id) => setCompleted((prev) => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     return next;
   });
-  const completedCount = completed.size;
-  const total = LANDING_DEMO_ITEMS.length;
-  const percent = total > 0 ? Math.round((completedCount / total) * 100) : 0;
+  const groupedItems = LANDING_DEMO_ITEMS.reduce((groups, item) => {
+    const key = `${item.day}|${item.date}`;
+    if (!groups[key]) groups[key] = { day: item.day, date: item.date, items: [] };
+    groups[key].items.push(item);
+    return groups;
+  }, {});
 
   return (
-    <section className="relative">
-      <div className="border border-zinc-800 rounded-md bg-zinc-950 p-5">
-        <div className="flex items-center justify-between pb-4 border-b border-zinc-800">
-          <p className="text-sm text-zinc-400">This Week (All Sources)</p>
-          <p className="text-xs px-2 py-1 rounded bg-blue-900/40 text-blue-300 border border-blue-900">Synced</p>
+    <section className="relative rounded-lg border border-zinc-800 bg-zinc-950/95 shadow-2xl shadow-black/30">
+      <div className="border-b border-zinc-800 px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-zinc-100">Weekly timeline</p>
+            <p className="mt-0.5 text-xs text-zinc-500">Canvas assignments and material dates stay labeled.</p>
+          </div>
+          <span className="shrink-0 rounded-full border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-200">
+            Synced
+          </span>
         </div>
-        <div className="mt-4 space-y-0">
-          {LANDING_DEMO_ITEMS.map((item) => {
-            const isCompleted = completed.has(item.id);
-            return (
-              <div
-                key={item.id}
-                className={`group relative flex items-start gap-3 py-3 border-b border-zinc-800/60 last:border-b-0 hover:bg-zinc-900/30 transition-all duration-300 cursor-pointer ${isCompleted ? "opacity-40" : ""}`}
-                onClick={() => toggle(item.id)}
-              >
-                {isCompleted && (
-                  <div className="absolute left-0 right-0 top-1/2 h-[2px] bg-zinc-500/60 pointer-events-none z-10" />
-                )}
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); toggle(item.id); }}
-                  className="mt-0.5 text-zinc-600 hover:text-green-500 transition-colors relative z-20 shrink-0"
-                >
-                  {isCompleted ? <CheckCircle2 size={18} className="text-green-500" /> : <Circle size={18} />}
-                </button>
-                <div className="flex-1 flex items-center justify-between gap-4 min-w-0 text-sm">
-                  <div className={`flex items-baseline gap-2 min-w-0 ${isCompleted ? "text-zinc-600" : "text-zinc-200"}`}>
-                    <span
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide shrink-0 ${getCourseColorClasses(item.color).tag}`}
-                    >
-                      {item.courseCode}
+      </div>
+
+      <div className="px-3 py-2">
+        {Object.values(groupedItems).map((group) => (
+          <div key={`${group.day}-${group.date}`} className="py-2">
+            <div className="mb-1.5 flex items-baseline justify-between gap-3 px-1">
+              <p className="text-[11px] font-semibold uppercase text-zinc-500">{group.day}</p>
+              <p className="text-xs text-zinc-600">{group.date}</p>
+            </div>
+
+            <div className="overflow-hidden rounded-md border border-zinc-800/80 bg-black/25">
+              {group.items.map((item) => {
+                const isCompleted = completed.has(item.id);
+                return (
+                  <button
+                    type="button"
+                    key={item.id}
+                    onClick={() => toggle(item.id)}
+                    className={`group grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-zinc-800/70 px-3 py-2.5 text-left last:border-b-0 transition-colors hover:bg-zinc-900/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500/60 ${isCompleted ? "text-zinc-500" : "text-zinc-100"}`}
+                  >
+                    <span className={`grid h-5 w-5 place-items-center rounded-full transition-colors ${isCompleted ? "text-green-400" : "text-zinc-500 group-hover:text-zinc-200"}`}>
+                      {isCompleted ? <CheckCircle2 size={18} /> : <Circle size={18} />}
                     </span>
-                    <span className="truncate">{item.name}</span>
-                    <span className="text-[10px] text-zinc-500 shrink-0 hidden sm:inline">{item.source}</span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="text-xs text-zinc-500">{item.day}</span>
-                    {getCategoryBadge(item.category, "opacity-90 scale-90 text-[10px]")}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <div className="mt-5 h-2 rounded-full bg-zinc-800 overflow-hidden">
-          <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${percent}%` }} />
-        </div>
-        <p className="mt-2 text-xs text-zinc-500">{completedCount} of {total} tasks complete</p>
+
+                    <span className="min-w-0">
+                      <span className={`block truncate text-sm font-medium ${isCompleted ? "text-zinc-500 line-through decoration-zinc-600" : "text-zinc-100"}`}>
+                        {item.name}
+                      </span>
+                      <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+                        <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${getCourseColorClasses(item.color).tag}`}>
+                          {item.courseCode}
+                        </span>
+                        {item.sourcePills.map((pill) => (
+                          <SourceStatusPill key={`${item.id}-${pill.label}`} pill={pill} size="xs" />
+                        ))}
+                      </span>
+                    </span>
+
+                    <span className="flex min-w-[72px] flex-col items-end gap-1">
+                      <span className={`text-xs font-semibold ${item.urgency === "Today" ? "text-red-300" : isCompleted ? "text-zinc-600" : "text-zinc-300"}`}>
+                        {item.due}
+                      </span>
+                      {item.urgency && !isCompleted ? (
+                        <span className="rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-medium text-red-200">
+                          {item.urgency}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );
 }
 
 const SYNC_DEFAULT_TIMEOUT_MS = 30000;
-/** AI resolve sends large syllabus payloads to OpenRouter and often exceeds 30s. */
+/** AI resolve sends large syllabus payloads to DeepInfra and often exceeds 30s. */
 const AI_RESOLVE_TIMEOUT_MS = 120000;
 
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 8000) {
@@ -119,7 +221,10 @@ async function fetchWithTimeout(resource, options = {}, timeoutMs = 8000) {
     );
   }, timeoutMs);
   try {
-    return await fetch(resource, { ...(options || {}), signal: controller.signal });
+    return await fetch(resource, {
+      ...apiFetchOptions(options || {}),
+      signal: controller.signal,
+    });
   } catch (err) {
     const isAbort = err?.name === "AbortError" || err?.name === "TimeoutError";
     if (isAbort) {
@@ -236,34 +341,74 @@ function formatDueInCourseTZ(dueStr) {
   }).format(dt);
 }
 
-function formatShortDueInCourseTZ(dueStr) {
+function formatDueTimeInCourseTZ(dueStr) {
+  if (!dueStr) return "--";
+  if (typeof dueStr === "string" && dueStr.trim().match(/^\d{4}-\d{2}-\d{2}$/)) return "Date only";
   const dt = parseDueToDate(dueStr);
   if (!dt) return "--";
-  return new Intl.DateTimeFormat("en-GB", {
+  return new Intl.DateTimeFormat("en-US", {
     timeZone: COURSE_TIMEZONE,
-    day: "numeric",
-    month: "short",
+    hour: "numeric",
+    minute: "2-digit",
   }).format(dt);
 }
 
+function formatMobileDueLabel(dueStr) {
+  const dt = parseDueToDate(dueStr);
+  if (!dt) return "--";
 
-function getStatusBadge(status) {
-  if (status === "CONFLICT") {
-    return (
-      <span className="ml-2 px-2 py-0.5 text-xs rounded bg-red-950 text-red-300 border border-red-900">
-        Conflict
-      </span>
-    );
+  const dateLabel = new Intl.DateTimeFormat("en-US", {
+    timeZone: COURSE_TIMEZONE,
+    month: "short",
+    day: "numeric",
+  }).format(dt);
+
+  if (typeof dueStr === "string" && dueStr.trim().match(/^\d{4}-\d{2}-\d{2}$/)) {
+    return dateLabel;
   }
-  if (status === "RESOLVED") {
-    return (
-      <span className="ml-2 px-2 py-0.5 text-xs rounded bg-green-950 text-green-300 border border-green-900">
-        Resolved
-      </span>
-    );
-  }
-  return null;
+
+  const timeLabel = new Intl.DateTimeFormat("en-US", {
+    timeZone: COURSE_TIMEZONE,
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(dt);
+
+  return `${dateLabel}, ${timeLabel}`;
 }
+
+function formatMobileWeekRange(startDate, endDate) {
+  const sameMonth = startDate.getFullYear() === endDate.getFullYear()
+    && startDate.getMonth() === endDate.getMonth();
+  if (sameMonth) {
+    return `${startDate.toLocaleDateString("en-US", { month: "short" })} ${startDate.getDate()}–${endDate.getDate()}`;
+  }
+  return `${startDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${endDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+}
+
+function getDayLabel(date) {
+  const today = new Date();
+  const tomorrow = addDays(today, 1);
+  if (isSameDay(date, today)) return "Today";
+  if (isSameDay(date, tomorrow)) return "Tomorrow";
+  if (date < new Date(today.getFullYear(), today.getMonth(), today.getDate())) return "Past due";
+  return "";
+}
+
+function getDeadlineMeta(item, isCompleted = false) {
+  if (isCompleted) return { label: "Done", tone: "text-green-300", pill: "border-green-500/30 bg-green-500/10 text-green-200" };
+  const due = parseDueToDate(item?.due);
+  if (!due) return { label: "No date", tone: "text-zinc-500", pill: "border-zinc-600/60 bg-zinc-900 text-zinc-400" };
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tomorrow = addDays(todayStart, 1);
+  const dayAfterTomorrow = addDays(todayStart, 2);
+
+  if (due < now) return { label: "Overdue", tone: "text-red-300", pill: "border-red-500/35 bg-red-500/10 text-red-200" };
+  if (due >= todayStart && due < tomorrow) return { label: "Today", tone: "text-red-300", pill: "border-red-500/35 bg-red-500/10 text-red-200" };
+  if (due >= tomorrow && due < dayAfterTomorrow) return { label: "Tomorrow", tone: "text-amber-300", pill: "border-amber-500/35 bg-amber-500/10 text-amber-200" };
+  return { label: "", tone: "text-zinc-400", pill: "" };
+}
+
 
 // INVERTED COLOR SCHEME (Light text, Dark BG) for badges
 // Categories: ASSIGNMENT and EXAM only (QUIZ merged into EXAM)
@@ -278,80 +423,75 @@ function getCategoryBadge(category, className = "") {
   return <span className={`${base} bg-blue-950/60 text-blue-200 border-blue-900`}>Assignment</span>;
 }
 
-function isAIDiscoveredItem(item) {
-  const status = String(item?.status || "").trim().toUpperCase();
-  if (status === "DISCOVERED") return true;
+const SOURCE_PILL_TONES = {
+  canvas: "border-blue-500/30 bg-blue-500/10 text-blue-200",
+  materials: "border-teal-500/30 bg-teal-500/10 text-teal-200",
+  updated: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+  review: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+  missing: "border-zinc-600/60 bg-zinc-900 text-zinc-400",
+};
 
-  const discoveredKey = extractDiscoveredKeyFromItem(item);
-  if (discoveredKey) return true;
-
-  const sourceOfTruth = String(item?.sourceOfTruth ?? item?.source_of_truth ?? "").trim().toLowerCase();
-  if (sourceOfTruth.includes("schedule")) return true;
-
-  return false;
+function makeSourcePill(label, tone) {
+  return { label, tone };
 }
 
-function getAIIndicatorMeta(item) {
-  const status = String(item?.status || "").trim().toUpperCase();
-  const discovered = isAIDiscoveredItem(item);
-  const resolved = status === "RESOLVED";
-
-  if (discovered && resolved) {
-    return {
-      kind: "both",
-      tooltip: "Found + date enhanced by AI",
-      toneClass: "text-teal-300",
-    };
-  }
-  if (discovered) {
-    return {
-      kind: "discovered",
-      tooltip: "Assignment found by AI",
-      toneClass: "text-sky-300",
-    };
-  }
-  if (resolved) {
-    return {
-      kind: "resolved",
-      tooltip: "Date enhanced by AI",
-      toneClass: "text-amber-300",
-    };
-  }
-  return null;
+function sourceTextForItem(item) {
+  return String(item?.sourceOfTruth ?? item?.source_of_truth ?? item?.source ?? "").trim().toLowerCase();
 }
 
-// Icons sourced from Material Symbols (filled SVG paths) for a compact AI marker style.
-const AI_DISCOVERED_ICON_PATH = "M11.95 17.55L8.8 11.3 2.55 8.15 8.8 5l3.15-6.25L15.1 5l6.25 3.15-6.25 3.15Zm0-2.6L14.45 10l4.95-2.5-4.95-2.5L11.95.05 9.45 5 4.5 7.5 9.45 10Zm0-7.45Zm5.6 17.85L15.95 22l-3.4-1.7 3.4-1.7 1.7-3.4 1.7 3.4 3.4 1.7-3.4 1.7Z";
-const AI_RESOLVED_ICON_PATH = "M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z";
+function getSourceStatusPills(item) {
+  const status = String(item?.status || "").trim().toUpperCase();
+  const sourceText = sourceTextForItem(item);
+  const hasCanvasSource = Boolean(extractAssignmentIdFromItem(item, item?.courseId))
+    || sourceText.includes("canvas");
+  const hasMaterialsSource = Boolean(extractDiscoveredKeyFromItem(item))
+    || status === "DISCOVERED"
+    || /schedule|material|syllabus|file|announcement|page|module/.test(sourceText);
+  const pills = [];
 
-function AIIndicatorGlyph({ kind = "discovered" }) {
-  const d = kind === "resolved" ? AI_RESOLVED_ICON_PATH : AI_DISCOVERED_ICON_PATH;
+  if (hasCanvasSource) {
+    pills.push(makeSourcePill("Canvas", "canvas"));
+  }
+  if (hasMaterialsSource) {
+    pills.push(makeSourcePill("AI-generated from materials", "materials"));
+  }
+
+  if (status === "RESOLVED") {
+    pills.push(makeSourcePill("AI-assisted date", "updated"));
+  }
+  if (status === "CONFLICT") {
+    pills.push(makeSourcePill("Review AI date", "review"));
+  }
+  if (!parseDueToDate(item?.due)) {
+    pills.push(makeSourcePill("No date yet", "missing"));
+  }
+
+  return pills;
+}
+
+function SourceStatusPill({ pill, size = "sm", className = "" }) {
+  if (!pill?.label) return null;
+  const sizeClass = size === "xs"
+    ? "px-1.5 py-0.5 text-[10px]"
+    : "px-2 py-0.5 text-xs";
+  const toneClass = SOURCE_PILL_TONES[pill.tone] || SOURCE_PILL_TONES.missing;
+
   return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="h-full w-full">
-      <path d={d} />
-    </svg>
+    <span className={`inline-flex shrink-0 items-center rounded-full border font-medium ${sizeClass} ${toneClass} ${className}`}>
+      {pill.label}
+    </span>
   );
 }
 
-function AIDiscoveredIndicator({ item, size = 12, className = "", showTooltip = true }) {
-  const meta = getAIIndicatorMeta(item);
-  if (!meta) return null;
-  const iconSize = typeof size === "number" ? `${size}px` : size;
+function SourceStatusPills({ item, size = "sm", limit = 3, className = "" }) {
+  const pills = getSourceStatusPills(item).slice(0, limit);
+  if (!pills.length) return null;
 
   return (
-    <span
-      className={`group relative inline-grid shrink-0 place-items-center align-middle leading-none ${className}`}
-      aria-label={meta.tooltip}
-      style={{ width: iconSize, height: iconSize }}
-    >
-      <span className={`inline-grid h-full w-full place-items-center ${meta.toneClass}`}>
-        <AIIndicatorGlyph kind={meta.kind} />
-      </span>
-      {showTooltip && (
-        <span className="pointer-events-none absolute left-1/2 top-[calc(100%+2px)] z-[60] -translate-x-1/2 whitespace-nowrap rounded-sm border border-zinc-700 bg-zinc-950 px-1 py-[1px] text-[8px] font-medium leading-tight text-zinc-200 opacity-0 shadow-md transition-opacity duration-100 group-hover:opacity-100">
-          {meta.tooltip}
-        </span>
-      )}
+    <span className={`inline-flex min-w-0 flex-wrap items-center gap-1.5 ${className}`}>
+      {pills.map((pill) => (
+        <SourceStatusPill key={`${pill.label}-${pill.tone}`} pill={pill} size={size} />
+      ))}
     </span>
   );
 }
@@ -747,12 +887,6 @@ function setSavedCourseSyncState(state, baseUrl = "", token = "") {
   localStorage.setItem(scopedKey, JSON.stringify(state));
 }
 
-function clearSavedCourseSyncState(baseUrl = "", token = "") {
-  const scopedKey = buildCourseSyncStateKey(baseUrl, token);
-  localStorage.removeItem(scopedKey);
-  localStorage.removeItem(LEGACY_COURSE_SYNC_STATE_KEY);
-}
-
 function buildCompletedItemsKey(userId = "", baseUrl = "", token = "") {
   const normalizedUserId = String(userId || "").trim();
   const normalizedBaseUrl = normalizeCanvasBaseUrl(baseUrl || localStorage.getItem("canvas_base_url"));
@@ -858,16 +992,6 @@ function setSavedCompletedItems(state, userId = "", baseUrl = "", token = "") {
   }
 }
 
-function clearSavedCompletedItems(userId = "", baseUrl = "", token = "") {
-  const key = buildCompletedItemsKey(userId, baseUrl, token);
-  localStorage.removeItem(key);
-  const tokenHash = hashScopeToken(token);
-  if (tokenHash) {
-    const tokenlessKey = buildCompletedItemsKey(userId, baseUrl, "");
-    if (tokenlessKey !== key) localStorage.removeItem(tokenlessKey);
-  }
-}
-
 function buildCompletionRefreshKey(userId = "", baseUrl = "") {
   const normalizedUserId = String(userId || "").trim();
   const normalizedBaseUrl = normalizeCanvasBaseUrl(baseUrl || localStorage.getItem("canvas_base_url"));
@@ -931,11 +1055,6 @@ function setSavedCoursesCache(userId = "", baseUrl = "", courses = []) {
   }
 }
 
-function clearSavedCoursesCache(userId = "", baseUrl = "") {
-  const key = buildCoursesCacheKey(userId, baseUrl);
-  localStorage.removeItem(key);
-}
-
 function buildAssignmentsCacheKey(userId = "", baseUrl = "") {
   const normalizedUserId = String(userId || "").trim();
   const normalizedBaseUrl = normalizeCanvasBaseUrl(baseUrl || localStorage.getItem("canvas_base_url"));
@@ -971,15 +1090,47 @@ function setSavedAssignmentsCache(userId = "", baseUrl = "", itemsByCourse = {})
   }
 }
 
-function clearSavedAssignmentsCache(userId = "", baseUrl = "") {
-  const key = buildAssignmentsCacheKey(userId, baseUrl);
-  localStorage.removeItem(key);
+function clearAllLocalCanvasSyncData() {
+  const exactKeys = new Set([
+    "canvas_base_url",
+    "course_colors",
+    "starred_courses",
+    "sync_enabled_courses",
+    "weekly_filters",
+    "last_sync_at",
+    "subscription_plan",
+    "global_font",
+    "theme",
+    "color_mode",
+  ]);
+  const prefixes = [
+    COURSE_SYNC_STATE_KEY_PREFIX,
+    COMPLETED_ITEMS_KEY_PREFIX,
+    CANVAS_COMPLETION_REFRESH_KEY_PREFIX,
+    COURSES_CACHE_KEY_PREFIX,
+    ASSIGNMENTS_CACHE_KEY_PREFIX,
+  ];
+
+  try {
+    const removals = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      if (exactKeys.has(key) || prefixes.some((prefix) => key === prefix || key.startsWith(`${prefix}:`))) {
+        removals.push(key);
+      }
+    }
+    removals.forEach((key) => localStorage.removeItem(key));
+  } catch {
+    // Browser storage can be unavailable in hardened/private contexts.
+  }
 }
 
 function App() {
   // Authentication State
-  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [canvasUser, setCanvasUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [legalConsentAccepted, setLegalConsentAccepted] = useState(false);
 
   // Canvas credentials (must be declared before loadCachedData uses them)
   const [canvasBaseUrl, setCanvasBaseUrl] = useState(
@@ -1023,11 +1174,10 @@ function App() {
   const [activeCourses, setActiveCourses] = useState([]);
   const [itemsByCourse, setItemsByCourse] = useState({});
 
-  // Load cached user data from Firestore on login
-  const loadCachedData = useCallback(async ({ authToken: authTokenArg, userId } = {}) => {
+  // Load cached user data from Supabase on login
+  const loadCachedData = useCallback(async ({ userId } = {}) => {
     try {
-      const authToken = authTokenArg || await getAuthToken();
-      if (!authToken) return;
+      if (!userId && !isAuthenticated()) return;
       const normalizedUserId = String(userId || "").trim();
       if (!normalizedUserId) return;
 
@@ -1082,9 +1232,11 @@ function App() {
       };
 
       // Optimized startup path: one authenticated request for credentials + preferences + courses + assignments.
-      const bootstrapRes = await fetchWithTimeout(`${API_BASE}/api/user/bootstrap?includeAssignments=1`, {
-        headers: { "Authorization": `Bearer ${authToken}` }
-      }, 9000).catch(err => {
+      const bootstrapRes = await fetchWithTimeout(
+        `${API_BASE}/api/user/bootstrap?includeAssignments=1`,
+        apiFetchOptions(),
+        9000,
+      ).catch(err => {
         console.warn(`Bootstrap fetch failed from ${API_BASE}:`, err.message);
         return null;
       });
@@ -1115,21 +1267,12 @@ function App() {
       if (!usedBootstrap) {
         // Fallback path for older backend revisions.
         const [credsRes, coursesRes, prefsRes] = await Promise.all([
-          fetchWithTimeout(`${API_BASE}/api/user/canvas-credentials`, {
-            headers: { "Authorization": `Bearer ${authToken}` }
-          }, 8000).catch(err => {
-            console.error(`Failed to fetch credentials from ${API_BASE}:`, err.message);
-            return null;
-          }),
-          fetchWithTimeout(`${API_BASE}/api/user/courses`, {
-            headers: { "Authorization": `Bearer ${authToken}` }
-          }, 8000).catch(err => {
+          Promise.resolve(null),
+          fetchWithTimeout(`${API_BASE}/api/user/courses`, apiFetchOptions(), 8000).catch(err => {
             console.error(`Failed to fetch cached courses from ${API_BASE}:`, err.message);
             return null;
           }),
-          fetchWithTimeout(`${API_BASE}/api/user/preferences`, {
-            headers: { "Authorization": `Bearer ${authToken}` }
-          }, 6000).catch(err => {
+          fetchWithTimeout(`${API_BASE}/api/user/preferences`, apiFetchOptions(), 6000).catch(err => {
             console.warn(`Failed to fetch preferences from ${API_BASE}:`, err.message);
             return null;
           }),
@@ -1219,6 +1362,7 @@ function App() {
             name: nameValue,
             due: dueValue,
             status: a.status,
+            sourceOfTruth: a.sourceOfTruth ?? a.source_of_truth ?? a.source ?? null,
             category: normalizeCategoryForViews(a.category),
           });
         }
@@ -1243,7 +1387,7 @@ function App() {
           const desired = mergedSyncState[cid] || (syncedCourseIds.has(cid) ? "SYNCED" : "NOT_SYNCED");
           if (!c || c.status === desired) return c;
           // Don't override in-progress statuses.
-          if (["Syncing...", "Queued...", "Sync failed"].includes(c.status)) return c;
+          if (["Reading course materials", "Syncing assignments", "Matching dates from materials", "Updating timeline", "Queued", "Sync failed"].includes(c.status)) return c;
           return { ...c, status: desired };
         }));
       };
@@ -1253,9 +1397,10 @@ function App() {
       } else {
         // Fallback/background hydration when bootstrap payload is unavailable.
         void (async () => {
-          const assignmentsRes = await fetch(`${API_BASE}/api/user/assignments?lite=1`, {
-            headers: { "Authorization": `Bearer ${authToken}` }
-          }).catch(err => {
+          const assignmentsRes = await fetchWithTimeout(
+            `${API_BASE}/api/user/assignments?lite=1`,
+            apiFetchOptions(),
+          ).catch(err => {
             console.error(`Failed to fetch assignments from ${API_BASE}:`, err.message);
             return null;
           });
@@ -1278,14 +1423,14 @@ function App() {
         if (shouldRefresh) {
           // Refresh is best-effort: run it in the background so courses render immediately.
           void (async () => {
-            const refreshedCoursesRes = await fetch(`${API_BASE}/api/canvas/courses`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${authToken}`
-              },
-              body: JSON.stringify({ base_url: resolvedBaseUrl, token: resolvedToken }),
-            }).catch(() => null);
+            const refreshedCoursesRes = await fetchWithTimeout(
+              `${API_BASE}/api/canvas/courses`,
+              apiFetchOptions({
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ base_url: resolvedBaseUrl, token: resolvedToken }),
+              }),
+            ).catch(() => null);
 
             if (!refreshedCoursesRes || !refreshedCoursesRes.ok) return;
             const refreshedCourses = await refreshedCoursesRes.json().catch(() => null);
@@ -1375,7 +1520,10 @@ function App() {
 
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/demo/session`, { method: "POST" });
+        const res = await fetch(
+          `${API_BASE}/api/demo/session`,
+          apiFetchOptions({ method: "POST" }),
+        );
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           throw new Error(data.error || "Demo mode is unavailable");
@@ -1425,17 +1573,31 @@ function App() {
     };
   }, [isDemoMode]);
 
-  const activeUser = isDemoMode ? demoSession?.user : firebaseUser;
+  const activeUser = isDemoMode ? demoSession?.user : canvasUser;
 
-  // Listen to Firebase auth state changes
+  // Canvas OAuth session bootstrap
   useEffect(() => {
     if (isDemoMode) return;
     // Initialize Canvas OAuth auth (check for callback tokens in URL, restore session)
-    initAuth();
+    void initAuth();
 
     const unsubscribe = onAuthChange(async ({ user, token }) => {
-      setFirebaseUser(user);
+      setCanvasUser(user);
       setAuthLoading(false);
+
+      if (user) {
+        const consent =
+          typeof user.legalConsentAccepted === "boolean"
+            ? user.legalConsentAccepted
+            : await fetchLegalConsentStatus();
+        setLegalConsentAccepted(consent);
+      } else {
+        setLegalConsentAccepted(false);
+        clearAllLocalCanvasSyncData();
+        setActiveCourses([]);
+        setItemsByCourse({});
+        setCanvasStatus(null);
+      }
 
       // Load cached data when user is authenticated
       if (user) {
@@ -1456,15 +1618,7 @@ function App() {
           setCompletedItems(getSavedCompletedItems(user.uid, connectedBaseUrl, ""));
         }
 
-        // Reuse token for follow-up bootstrap-dependent calls.
-        const tokenPromise = token
-          ? Promise.resolve(token)
-          : getAuthToken().catch((e) => {
-            console.warn("Failed to get auth token during bootstrap:", e?.message || e);
-            return null;
-          });
-
-        loadCachedData({ authToken: token || undefined, userId: user.uid }).catch(err => {
+        loadCachedData({ userId: user.uid }).catch(err => {
           console.error("Background loadCachedData failed:", err);
         });
 
@@ -1475,8 +1629,7 @@ function App() {
         const lastRefreshAt = getLastCompletionRefreshAt(user.uid, refreshBaseUrl);
         const shouldRefreshCompletion = !!refreshBaseUrl && (!lastRefreshAt || (Date.now() - lastRefreshAt) >= refreshThrottleMs);
 
-        const refreshToken = token || await tokenPromise;
-        if (shouldRefreshCompletion && refreshToken) {
+        if (shouldRefreshCompletion) {
           // Stamp before network call to prevent repeat reload storms.
           setLastCompletionRefreshAt(user.uid, refreshBaseUrl, Date.now());
 
@@ -1492,18 +1645,18 @@ function App() {
                 return;
               }
 
-              const refreshRes = await fetch(`${API_BASE}/api/assignments/refresh-completion`, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "Authorization": `Bearer ${refreshToken}`,
-                },
-                body: JSON.stringify({
-                  base_url: refreshBaseUrl,
-                  token: "",
-                  course_ids: syncedCourseIds,
+              const refreshRes = await fetchWithTimeout(
+                `${API_BASE}/api/assignments/refresh-completion`,
+                apiFetchOptions({
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    base_url: refreshBaseUrl,
+                    token: "",
+                    course_ids: syncedCourseIds,
+                  }),
                 }),
-              });
+              );
 
               if (!refreshRes.ok) {
                 return;
@@ -1554,14 +1707,7 @@ function App() {
   const handleSignOut = async () => {
     try {
       await logout();
-      // Clear Canvas credentials too
-      clearSavedCourseSyncState(canvasBaseUrl, canvasToken);
-      if (firebaseUser?.uid) {
-        clearSavedCoursesCache(firebaseUser.uid, canvasBaseUrl);
-        clearSavedAssignmentsCache(firebaseUser.uid, canvasBaseUrl);
-        clearSavedCompletedItems(firebaseUser.uid, canvasBaseUrl, canvasToken || "");
-      }
-      localStorage.removeItem('canvas_base_url');
+      clearAllLocalCanvasSyncData();
       setActiveCourses([]);
       setItemsByCourse({});
       setCanvasStatus(null);
@@ -1585,6 +1731,75 @@ function App() {
   const [showProfilePopup, setShowProfilePopup] = useState(false);
   const [showSyncProgressPopover, setShowSyncProgressPopover] = useState(false);
   const [syncToastOffset, setSyncToastOffset] = useState({ top: 72, right: 16 });
+  const [isMobileLayout, setIsMobileLayout] = useState(() => (
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 767px)").matches : false
+  ));
+  const [mobileNotice, setMobileNotice] = useState(null);
+  const mobileNoticeTimerRef = useRef(null);
+  const [isDisconnectingCanvas, setIsDisconnectingCanvas] = useState(false);
+  const [isExportingData, setIsExportingData] = useState(false);
+  const [showDeleteDataConfirm, setShowDeleteDataConfirm] = useState(false);
+  const [isDeletingData, setIsDeletingData] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px)");
+    const update = () => setIsMobileLayout(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+
+  const dismissMobileNotice = useCallback(() => {
+    if (mobileNoticeTimerRef.current) {
+      window.clearTimeout(mobileNoticeTimerRef.current);
+      mobileNoticeTimerRef.current = null;
+    }
+    setMobileNotice(null);
+  }, []);
+
+  const showMobileNotice = useCallback((nextNotice) => {
+    if (!nextNotice) return;
+    if (mobileNoticeTimerRef.current) {
+      window.clearTimeout(mobileNoticeTimerRef.current);
+      mobileNoticeTimerRef.current = null;
+    }
+
+    const id = nextNotice.id || `mobile-notice-${Date.now()}`;
+    const tone = nextNotice.tone || "info";
+    const duration = nextNotice.duration === null
+      ? null
+      : Number(nextNotice.duration) > 0
+        ? Number(nextNotice.duration)
+        : tone === "error"
+          ? 7000
+          : 4200;
+
+    setMobileNotice({ ...nextNotice, id, tone });
+
+    if (duration) {
+      mobileNoticeTimerRef.current = window.setTimeout(() => {
+        mobileNoticeTimerRef.current = null;
+        setMobileNotice((current) => current?.id === id ? null : current);
+      }, duration);
+    }
+  }, []);
+
+  const notifyUser = useCallback((notice) => {
+    if (isMobileLayout) {
+      showMobileNotice(notice);
+      return;
+    }
+
+    if (notice?.tone === "error" || notice?.tone === "warning") {
+      window.alert([notice.title, notice.message].filter(Boolean).join("\n\n"));
+    }
+  }, [isMobileLayout, showMobileNotice]);
+
+  useEffect(() => () => {
+    if (mobileNoticeTimerRef.current) {
+      window.clearTimeout(mobileNoticeTimerRef.current);
+    }
+  }, []);
 
   const updateSyncToastOffset = useCallback(() => {
     if (typeof window === "undefined") return;
@@ -1674,6 +1889,11 @@ function App() {
   const [syncRunTotal, setSyncRunTotal] = useState(0);
   const [syncRunCompleted, setSyncRunCompleted] = useState(0);
   const [lastSyncAt, setLastSyncAt] = useState(() => localStorage.getItem("last_sync_at") || "");
+  const [syncStartedAt, setSyncStartedAt] = useState(null);
+  const [syncNow, setSyncNow] = useState(() => Date.now());
+  const [syncWarningsByCourse, setSyncWarningsByCourse] = useState({});
+  const [showMobileSyncComplete, setShowMobileSyncComplete] = useState(false);
+  const wasSyncInProgressRef = useRef(false);
 
   useEffect(() => {
     if (!lastSyncAt) {
@@ -1695,11 +1915,21 @@ function App() {
     if (!courseIdsToQueue.length) return [];
 
     setSyncQueue((prev) => [...(prev || []), ...courseIdsToQueue]);
+    setSyncStartedAt(new Date().toISOString());
+    setShowSyncProgressPopover(true);
 
     setSyncStatus((prev) => {
       const next = { ...(prev || {}) };
       for (const courseId of courseIdsToQueue) {
-        next[courseId] = "Queued...";
+        next[courseId] = "Queued";
+      }
+      return next;
+    });
+
+    setSyncWarningsByCourse((prev) => {
+      const next = { ...(prev || {}) };
+      for (const courseId of courseIdsToQueue) {
+        delete next[courseId];
       }
       return next;
     });
@@ -1709,7 +1939,7 @@ function App() {
 
   // Persist checklist state by user + connected Canvas credentials so reloads keep checkbox status.
   useEffect(() => {
-    if (isDemoMode || !firebaseUser?.uid) {
+    if (isDemoMode || !canvasUser?.uid) {
       if (!isDemoMode) setCompletedItems({});
       return;
     }
@@ -1721,11 +1951,11 @@ function App() {
       return;
     }
 
-    setCompletedItems(getSavedCompletedItems(firebaseUser.uid, connectedBaseUrl, connectedToken));
-  }, [firebaseUser?.uid, canvasBaseUrl, canvasToken, isDemoMode]);
+    setCompletedItems(getSavedCompletedItems(canvasUser.uid, connectedBaseUrl, connectedToken));
+  }, [canvasUser?.uid, canvasBaseUrl, canvasToken, isDemoMode]);
 
   useEffect(() => {
-    if (!firebaseUser?.uid || isDemoMode) return;
+    if (!canvasUser?.uid || isDemoMode) return;
 
     const connectedBaseUrl = (canvasBaseUrl || localStorage.getItem("canvas_base_url") || "").trim();
     const connectedToken = (canvasToken || "").trim(); // may be empty in cloud mode
@@ -1733,15 +1963,24 @@ function App() {
 
     setSavedCompletedItems(
       completedItems,
-      firebaseUser.uid,
+      canvasUser.uid,
       connectedBaseUrl,
       connectedToken
     );
-  }, [completedItems, firebaseUser?.uid, canvasBaseUrl, canvasToken, isDemoMode]);
+  }, [completedItems, canvasUser?.uid, canvasBaseUrl, canvasToken, isDemoMode]);
 
   const toggleFilter = (category) => {
     setWeeklyFilters(prev => ({ ...prev, [category]: !prev[category] }));
   };
+
+  const resetWeeklyFilters = useCallback(() => {
+    setWeeklyFilters({
+      ASSIGNMENT: true,
+      EXAM: true,
+    });
+  }, []);
+
+  const hasDisabledWeeklyFilters = Object.values(weeklyFilters).some((value) => value === false);
 
   // Course colors for color coding - expanded palette with names
   const COURSE_COLOR_PALETTE = [
@@ -1826,26 +2065,52 @@ function App() {
 
   const persistUserPreferences = useCallback(async (updates) => {
     try {
-      const authToken = await getAuthToken();
-      if (!authToken) return;
+      if (!isAuthenticated()) return true;
 
-      const res = await fetch(`${API_BASE}/api/user/preferences`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${authToken}`,
-        },
-        body: JSON.stringify(updates || {}),
-      });
+      const res = await fetchWithTimeout(
+        `${API_BASE}/api/user/preferences`,
+        apiFetchOptions({
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updates || {}),
+        }),
+      );
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         console.warn("Failed to persist preferences:", res.status, text);
+        if (isMobileLayout) {
+          showMobileNotice({
+            tone: "error",
+            title: "Couldn’t save your changes",
+            message: "Your update is still visible on this device. Check your connection and try again.",
+            actionLabel: "Try again",
+            onAction: () => {
+              void persistUserPreferences(updates);
+            },
+            duration: null,
+          });
+        }
+        return false;
       }
+      return true;
     } catch (e) {
       console.warn("Failed to persist preferences:", e);
+      if (isMobileLayout) {
+        showMobileNotice({
+          tone: "error",
+          title: "Couldn’t save your changes",
+          message: "Your update is still visible on this device. Check your connection and try again.",
+          actionLabel: "Try again",
+          onAction: () => {
+            void persistUserPreferences(updates);
+          },
+          duration: null,
+        });
+      }
+      return false;
     }
-  }, []);
+  }, [isMobileLayout, showMobileNotice]);
 
   const pendingPreferenceUpdatesRef = useRef({});
   const preferencePersistTimerRef = useRef(null);
@@ -1999,64 +2264,91 @@ function App() {
     syncToastOrderRef.current = nextOrder;
   }, []);
 
-  const pushSyncPromiseToast = useCallback((promiseOrFactory, options = {}) => {
+  const runWithSyncFeedback = useCallback((promiseOrFactory, options = {}) => {
     const {
       id: toastId,
       position = "top-right",
       loadingTitle = "Syncing...",
       successTitle = "Sync complete",
       successDescription,
+      successTone = "success",
       errorTitle = "Sync failed",
       errorDescription,
+      errorActionLabel,
+      onErrorAction,
     } = options;
     const resolveDescription = (value, arg) => (typeof value === "function" ? value(arg) : value);
+    const resolveTone = (value, arg) => (typeof value === "function" ? value(arg) : value);
 
     const loadingId = toastId ? `${toastId}-loading` : `sync-loading-${Date.now()}`;
-    trackSyncToast(loadingId);
-    sileo.show({
-      id: loadingId,
-      position,
-      state: "loading",
-      title: loadingTitle,
-      duration: null,
-      fill: "#0b1020",
-      styles: {
-        title: "text-white",
-      },
-    });
+    if (!isMobileLayout) {
+      trackSyncToast(loadingId);
+      sileo.show({
+        id: loadingId,
+        position,
+        state: "loading",
+        title: loadingTitle,
+        duration: null,
+        fill: "#0b1020",
+        styles: {
+          title: "text-white",
+        },
+      });
+    }
 
     const promise = typeof promiseOrFactory === "function" ? promiseOrFactory() : promiseOrFactory;
 
     return promise.then((data) => {
-      sileo.success({
-        id: loadingId,
-        position,
-        title: successTitle,
-        description: resolveDescription(successDescription, data),
-        duration: 4200,
-        fill: "#0b1020",
-        styles: {
-          title: "text-white",
-          description: "text-white/90",
-        },
-      });
+      const description = resolveDescription(successDescription, data);
+      if (isMobileLayout) {
+        showMobileNotice({
+          tone: resolveTone(successTone, data) || "success",
+          title: successTitle,
+          message: description,
+        });
+      } else {
+        sileo.success({
+          id: loadingId,
+          position,
+          title: successTitle,
+          description,
+          duration: 4200,
+          fill: "#0b1020",
+          styles: {
+            title: "text-white",
+            description: "text-white/90",
+          },
+        });
+      }
       return data;
     }).catch((err) => {
-      sileo.error({
-        id: loadingId,
-        position,
-        title: errorTitle,
-        description: resolveDescription(errorDescription, err),
-        duration: 4200,
-        fill: "#0b1020",
-        styles: {
-          title: "text-white",
-          description: "text-white/90",
-        },
-      });
+      const description = resolveDescription(errorDescription, err);
+      if (isMobileLayout) {
+        showMobileNotice({
+          tone: "error",
+          title: errorTitle,
+          message: description,
+          actionLabel: errorActionLabel,
+          onAction: onErrorAction,
+          duration: onErrorAction ? null : 7000,
+        });
+      } else {
+        sileo.error({
+          id: loadingId,
+          position,
+          title: errorTitle,
+          description,
+          duration: 4200,
+          fill: "#0b1020",
+          styles: {
+            title: "text-white",
+            description: "text-white/90",
+          },
+        });
+      }
       throw err;
     });
-  }, [trackSyncToast]);
+  }, [isMobileLayout, showMobileNotice, trackSyncToast]);
 
   const queueSelectedSyncCourses = useCallback(() => {
     const queuedCourseIds = queueSyncCourses(syncEnabledCourseIds);
@@ -2094,19 +2386,104 @@ function App() {
     ? Math.round((selectedSyncSyncedCount / selectedSyncCourseCount) * 100)
     : 0;
   const isSyncInProgress = isSyncing || Boolean(syncingCourseId) || syncQueue.length > 0;
+  useEffect(() => {
+    if (!isSyncInProgress) {
+      setSyncStartedAt(null);
+      return undefined;
+    }
+
+    setSyncNow(Date.now());
+    const timer = window.setInterval(() => setSyncNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isSyncInProgress]);
+
+  useEffect(() => {
+    if (isSyncInProgress) {
+      wasSyncInProgressRef.current = true;
+      setShowMobileSyncComplete(false);
+      return undefined;
+    }
+
+    if (wasSyncInProgressRef.current) {
+      wasSyncInProgressRef.current = false;
+      if (selectedSyncCourseCount > 0) {
+        setShowMobileSyncComplete(true);
+        const timer = window.setTimeout(() => setShowMobileSyncComplete(false), 2400);
+        return () => window.clearTimeout(timer);
+      }
+    }
+
+    return undefined;
+  }, [isSyncInProgress, selectedSyncCourseCount]);
+
   const syncRunProgressPercent = useMemo(() => {
     if (!isSyncInProgress || syncRunTotal <= 0) return 0;
     const finished = Math.min(syncRunCompleted, syncRunTotal);
-    const inFlightBoost = syncingCourseId ? 0.35 : 0;
-    return Math.min(99, Math.round(((finished + inFlightBoost) / syncRunTotal) * 100));
-  }, [isSyncInProgress, syncRunCompleted, syncRunTotal, syncingCourseId]);
+    const activeStatus = String(syncStatus[normalizeCourseId(syncingCourseId)] || "").toLowerCase();
+    const inFlightProgress = !syncingCourseId
+      ? 0
+      : activeStatus.includes("updating")
+        ? 0.86
+        : activeStatus.includes("matching")
+          ? 0.64
+          : activeStatus.includes("assignment")
+            ? 0.4
+            : activeStatus.includes("material")
+              ? 0.16
+              : 0.08;
+    return Math.min(99, Math.round(((finished + inFlightProgress) / syncRunTotal) * 100));
+  }, [isSyncInProgress, syncRunCompleted, syncRunTotal, syncStatus, syncingCourseId]);
   const syncSelectionProgressPercent = isSyncInProgress && syncRunTotal > 0
     ? syncRunProgressPercent
     : baseSyncSelectionProgressPercent;
   const syncProgressDisplayPercent = selectedSyncCourseCount === 0 ? 0 : syncSelectionProgressPercent;
   const syncProgressLabel = isSyncInProgress && syncRunTotal > 0
-    ? `${Math.min(syncRunCompleted, syncRunTotal)}/${syncRunTotal} synced`
+    ? `${Math.min(syncRunCompleted, syncRunTotal)}/${syncRunTotal} completed`
     : `${selectedSyncSyncedCount}/${selectedSyncCourseCount || 0} synced`;
+  const activeSyncCourse = useMemo(() => {
+    const activeId = normalizeCourseId(syncingCourseId || syncQueue[0]);
+    if (!activeId) return null;
+    return activeCourses.find((course) => normalizeCourseId(course.id) === activeId) || null;
+  }, [activeCourses, syncQueue, syncingCourseId]);
+  const activeSyncCourseLabel = activeSyncCourse
+    ? deriveCourseCode(activeSyncCourse.courseCode, activeSyncCourse.name) !== "UNK"
+      ? deriveCourseCode(activeSyncCourse.courseCode, activeSyncCourse.name)
+      : activeSyncCourse.name
+    : "No active course";
+  const activeSyncPhase = syncingCourseId
+    ? syncStatus[normalizeCourseId(syncingCourseId)] || "Starting sync"
+    : syncQueue.length > 0
+      ? "Queued"
+      : "Ready";
+  const syncWaitingCount = Math.max(0, syncQueue.length - (syncingCourseId ? 1 : 0));
+  const showMobileSyncProgress = isSyncInProgress || showMobileSyncComplete;
+  const mobileSyncProgressPercent = showMobileSyncComplete ? 100 : syncProgressDisplayPercent;
+  const mobileSyncComplete = showMobileSyncComplete || (!isSyncInProgress && mobileSyncProgressPercent >= 100);
+  const mobileSyncPhaseLabel = showMobileSyncComplete ? "Synced" : activeSyncPhase;
+  const mobileSyncDetailLabel = showMobileSyncComplete
+    ? "Selected classes are up to date"
+    : `${activeSyncCourseLabel} / ${syncProgressLabel}`;
+  const syncElapsedLabel = useMemo(() => {
+    if (!isSyncInProgress || !syncStartedAt) return "";
+    const started = new Date(syncStartedAt).getTime();
+    if (!Number.isFinite(started)) return "";
+    const elapsedSeconds = Math.max(0, Math.floor((syncNow - started) / 1000));
+    const minutes = Math.floor(elapsedSeconds / 60);
+    const seconds = String(elapsedSeconds % 60).padStart(2, "0");
+    return `${minutes}:${seconds}`;
+  }, [isSyncInProgress, syncNow, syncStartedAt]);
+  const visibleSyncWarnings = useMemo(() => {
+    return Object.entries(syncWarningsByCourse || {})
+      .filter(([, message]) => Boolean(message))
+      .map(([courseId, message]) => {
+        const course = activeCourses.find((c) => normalizeCourseId(c.id) === normalizeCourseId(courseId));
+        const code = course ? deriveCourseCode(course.courseCode, course.name) : "";
+        return {
+          courseLabel: code && code !== "UNK" ? code : (course?.name || `Course ${courseId}`),
+          message,
+        };
+      });
+  }, [activeCourses, syncWarningsByCourse]);
   const lastSyncLabel = useMemo(() => {
     if (!lastSyncAt) return "Never";
     const dt = new Date(lastSyncAt);
@@ -2142,7 +2519,17 @@ function App() {
   const completeEditingSyncClasses = useCallback(() => {
     setSyncEnabledCoursesAndPersist(syncEnabledDraft);
     setIsEditingSyncClasses(false);
-  }, [setSyncEnabledCoursesAndPersist, syncEnabledDraft]);
+    if (isMobileLayout) {
+      const count = Object.keys(syncEnabledDraft || {}).length;
+      showMobileNotice({
+        tone: count > 0 ? "success" : "info",
+        title: count > 0 ? "Classes updated" : "Sync selection cleared",
+        message: count > 0
+          ? `${count} ${count === 1 ? "class is" : "classes are"} ready to sync.`
+          : "Choose at least one class before running Sync.",
+      });
+    }
+  }, [isMobileLayout, setSyncEnabledCoursesAndPersist, showMobileNotice, syncEnabledDraft]);
 
   const cancelEditingSyncClasses = useCallback(() => {
     setSyncEnabledDraft({});
@@ -2154,10 +2541,10 @@ function App() {
   }, [syncEnabledDraft]);
 
   const renderSyncToolbarControls = useCallback(() => (
-    <div className="flex flex-col items-center gap-1">
+    <div className="flex flex-col items-end gap-1">
       {isDemoMode && highlightDemoSync && !showDemoIntro ? (
-        <p className="text-[11px] font-medium text-amber-300/90 whitespace-nowrap">
-          Click Sync to load the demo course
+        <p className="whitespace-nowrap text-[11px] font-medium text-amber-300/90">
+          Ready for the demo sync
         </p>
       ) : null}
       <button
@@ -2166,11 +2553,11 @@ function App() {
           queueSelectedSyncCourses();
         }}
         disabled={selectedSyncCourseCount === 0 || isSyncInProgress || (isDemoMode && showDemoIntro)}
-        className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-sm font-medium transition-colors ${selectedSyncCourseCount === 0 || isSyncInProgress || (isDemoMode && showDemoIntro)
+        className={`inline-flex min-h-10 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition-[background-color,border-color,color,opacity] duration-200 ${selectedSyncCourseCount === 0 || isSyncInProgress || (isDemoMode && showDemoIntro)
           ? "cursor-not-allowed bg-blue-700 text-blue-100 border-blue-700 opacity-70"
           : "bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
           } ${highlightDemoSync && !showDemoIntro
-            ? "ring-2 ring-amber-400 ring-offset-2 ring-offset-zinc-950 animate-pulse shadow-lg shadow-amber-500/25"
+            ? "ring-2 ring-amber-400 ring-offset-2 ring-offset-zinc-950 shadow-lg shadow-amber-500/20"
             : ""
           }`}
         title={
@@ -2181,6 +2568,11 @@ function App() {
               : "Sync all selected classes"
         }
       >
+        {isSyncInProgress ? (
+          <Loader2 size={16} className="animate-spin" aria-hidden="true" />
+        ) : (
+          <RefreshCw size={16} aria-hidden="true" />
+        )}
         <span>
           {isSyncInProgress
             ? "Syncing..."
@@ -2189,6 +2581,9 @@ function App() {
               : "Sync"}
         </span>
       </button>
+      {!isSyncInProgress && selectedSyncCourseCount === 0 ? (
+        <p className="text-[11px] font-medium text-zinc-500">Select a class first</p>
+      ) : null}
     </div>
   ), [
     allSelectedCoursesAlreadySynced,
@@ -2280,6 +2675,7 @@ function App() {
 
   // Home screen state
   const [currentWeekStart, setCurrentWeekStart] = useState(new Date());
+  const [mobileSelectedWeekKey, setMobileSelectedWeekKey] = useState("");
   const [currentMonth, setCurrentMonth] = useState(new Date());
 
   // useMemo for performance - itemsByCourse updates frequently
@@ -2322,200 +2718,165 @@ function App() {
       if (!existing.due && item.due) {
         existing.due = item.due;
       }
+      if (!existing.canvasAssignmentId && item.canvasAssignmentId) {
+        existing.canvasAssignmentId = item.canvasAssignmentId;
+      }
+      if (!existing.discoveredKey && item.discoveredKey) {
+        existing.discoveredKey = item.discoveredKey;
+      }
+      if (!existing.sourceOfTruth && item.sourceOfTruth) {
+        existing.sourceOfTruth = item.sourceOfTruth;
+      }
+      if (item.status === "CONFLICT" || (!existing.status && item.status) || (item.status === "RESOLVED" && existing.status !== "CONFLICT")) {
+        existing.status = item.status;
+      }
     }
 
     return Array.from(merged.values());
   }, [itemsByCourse]);
 
-  async function connectCanvas() {
-    const baseUrl = canvasBaseUrl.trim();
-    const token = canvasToken.trim();
-
-
-    if (!baseUrl) {
-      setCanvasStatus("Missing Canvas URL");
-      return;
-    }
-    if (ENABLE_MANUAL_TOKEN_CONNECT && !token) {
-      setCanvasStatus("Missing access token");
-      return;
-    }
-
-    setCanvasStatus("Connecting...");
-
-    try {
-      // Get fresh auth token for API calls
-      const authToken = await getAuthToken();
-      if (!authToken) {
-        setCanvasStatus("Please sign in first");
-        return;
-      }
-      const authHeaders = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${authToken}`
-      };
-
-      const testRes = await fetch(`${API_BASE}/api/canvas/test`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({ base_url: baseUrl, token }),
-      });
-
-      const testData = await testRes.json();
-
-      if (!testData.valid) {
-        setCanvasStatus("Invalid token");
-        return;
-      }
-
-      // Save credentials to server (tied to Google account)
-      const saveCredsRes = await fetch(`${API_BASE}/api/user/canvas-credentials`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({ base_url: baseUrl, token }),
-      });
-      if (!saveCredsRes.ok) {
-        let detail = `status ${saveCredsRes.status}`;
-        try {
-          const j = await saveCredsRes.json();
-          if (j?.error) detail = j.error;
-        } catch (_) {
-          // ignore
-        }
-        // Continue with the session token so the user can at least proceed,
-        // but warn that reloads may require reconnecting if the server can't persist creds.
-        console.warn("Failed to persist Canvas credentials:", detail);
-        setCanvasStatus(`Warning: couldn't save credentials (${detail})`);
-      }
-
-      // Keep only non-sensitive URL locally
-      localStorage.setItem("canvas_base_url", baseUrl);
-
-      setCanvasStatus("Fetching courses...");
-
-      const courseRes = await fetch(`${API_BASE}/api/canvas/courses`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({ base_url: baseUrl, token }),
-      });
-
-      const courses = await courseRes.json();
-
-      // Check if courses API returned an error
-      if (!courseRes.ok) {
-        console.error('Courses API error:', courses);
-        const serverMsg = courses?.error ? `: ${courses.error}` : "";
-        setCanvasStatus(`Failed to fetch courses${serverMsg}`);
-        return;
-      }
-
-      // Ensure courses is an array
-      if (!Array.isArray(courses)) {
-        console.error('Courses response is not an array:', courses);
-        setCanvasStatus("Invalid courses response");
-        return;
-      }
-
-      // Debug: Log course data to see what Canvas API returns
-      console.log('Canvas courses received:', courses.length);
-      if (courses.length > 0) {
-        console.log('Sample course with term data:', courses[0]);
-        courses.forEach(c => {
-          console.log(`Course: ${c.name?.substring(0, 40) || 'Unknown'} | concluded: ${c.concluded} | term: ${c.term?.name} | term_end: ${c.term?.end_at}`);
-        });
-      }
-
-      const existingCourseCodeById = Object.fromEntries(
-        activeCourses.map(c => [normalizeCourseId(c.id), c.courseCode])
-      );
-      const existingCourseStatusById = Object.fromEntries(
-        activeCourses.map(c => [normalizeCourseId(c.id), c.status])
-      );
-      const savedCourseSyncState = getSavedCourseSyncState(baseUrl, token);
-
-      const active = courses
-        .filter((c) => c.workflow_state === "available")
-        .map((c) => {
-          const cid = normalizeCourseId(c.id);
-          const now = new Date();
-          const backendActiveFlag = typeof c._app_is_currently_active === "boolean"
-            ? c._app_is_currently_active
-            : null;
-
-          // Canvas API returns 'concluded' flag when include[]=concluded is used
-          // Also returns 'term' object with term dates when include[]=term is used
-          const isConcluded = c.concluded === true;
-
-          // Use term end date if available (most reliable)
-          const termEndAt = c.term?.end_at ? new Date(c.term.end_at) : null;
-          const termStartAt = c.term?.start_at ? new Date(c.term.start_at) : null;
-
-          // Course dates as fallback
-          const courseEndAt = c.end_at ? new Date(c.end_at) : null;
-          const courseStartAt = c.start_at ? new Date(c.start_at) : null;
-
-          // Use term dates first, then course dates
-          const effectiveEndAt = termEndAt || courseEndAt;
-          const effectiveStartAt = termStartAt || courseStartAt;
-
-          // Determine if course is currently active
-          let isCurrentlyActive;
-
-          if (backendActiveFlag !== null) {
-            isCurrentlyActive = backendActiveFlag;
-          } else if (isConcluded) {
-            // Canvas explicitly says this course is concluded
-            isCurrentlyActive = false;
-          } else if (effectiveEndAt && now > effectiveEndAt) {
-            // Term/course has ended
-            isCurrentlyActive = false;
-          } else if (effectiveStartAt && effectiveEndAt) {
-            // Has both dates - check if we're in range
-            isCurrentlyActive = now >= effectiveStartAt && now <= effectiveEndAt;
-          } else if (effectiveStartAt && !effectiveEndAt) {
-            // Has start but no end - active if we're past start
-            isCurrentlyActive = now >= effectiveStartAt;
-          } else {
-            // No dates or flags: don't mark everything as active.
-            isCurrentlyActive = false;
-          }
-
-          return {
-            id: cid,
-            name: c.name,
-            courseCode: deriveCourseCode(existingCourseCodeById[cid] || c.course_code, c.name),
-            status: existingCourseStatusById[cid] || savedCourseSyncState[cid] || "NOT_SYNCED",
-            startAt: effectiveStartAt?.toISOString(),
-            endAt: effectiveEndAt?.toISOString(),
-            termName: c.term?.name || null,
-            isCurrentlyActive,
-          };
-        });
-
-      setActiveCourses(active);
-      if (firebaseUser?.uid) {
-        setSavedCoursesCache(firebaseUser.uid, baseUrl, active);
-      }
-      setCanvasStatus("Connected");
-    } catch (err) {
-      console.error('Canvas connection error:', err);
-      setCanvasStatus(`Connection failed: ${err.message || 'Network error'}`);
-    }
+  function connectCanvas() {
+    signInWithCanvas();
   }
 
-  function disconnectCanvas() {
-    clearSavedCourseSyncState(canvasBaseUrl, canvasToken);
-    localStorage.removeItem("canvas_base_url");
-    if (firebaseUser?.uid) {
-      clearSavedCoursesCache(firebaseUser.uid, canvasBaseUrl);
-      clearSavedAssignmentsCache(firebaseUser.uid, canvasBaseUrl);
-      clearSavedCompletedItems(firebaseUser.uid, canvasBaseUrl, canvasToken || "");
+  async function disconnectCanvas() {
+    if (isDisconnectingCanvas) return;
+    setIsDisconnectingCanvas(true);
+    // Revoke the OAuth token at Canvas and clear server-stored credentials first
+    // (cloud, non-demo). The local cleanup below is best-effort UI state reset.
+    if (!isDemoMode) {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/user/disconnect-canvas`,
+          apiFetchOptions({ method: "POST" }),
+        );
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `Failed (${res.status})`);
+        }
+      } catch (err) {
+        notifyUser({
+          tone: "error",
+          title: "Couldn’t disconnect Canvas",
+          message: err?.message || String(err),
+          actionLabel: "Try again",
+          onAction: () => {
+            void disconnectCanvas();
+          },
+          duration: null,
+        });
+        setIsDisconnectingCanvas(false);
+        return;
+      }
     }
+    clearAllLocalCanvasSyncData();
     setCanvasBaseUrl("");
     setCanvasToken("");
     setActiveCourses([]);
     setItemsByCourse({});
     setCanvasStatus("Disconnected");
+    setIsDisconnectingCanvas(false);
+    notifyUser({
+      tone: "success",
+      title: "Canvas disconnected",
+      message: "Saved course data was cleared from this device.",
+    });
+  }
+
+  async function exportMyData() {
+    if (isDemoMode) {
+      notifyUser({
+        tone: "info",
+        title: "Export is unavailable in the demo",
+        message: "The demo uses temporary sample data and does not create an account export.",
+      });
+      return;
+    }
+    if (isExportingData) return;
+    setIsExportingData(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/user/export`, apiFetchOptions());
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "canvassync-export.json";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      notifyUser({
+        tone: "success",
+        title: "Export downloaded",
+        message: "Your CanvasSync data was saved as canvassync-export.json.",
+      });
+    } catch (err) {
+      notifyUser({
+        tone: "error",
+        title: "Couldn’t export your data",
+        message: err?.message || String(err),
+        actionLabel: "Try again",
+        onAction: () => {
+          void exportMyData();
+        },
+        duration: null,
+      });
+    } finally {
+      setIsExportingData(false);
+    }
+  }
+
+  async function deleteAllMyData() {
+    if (isDemoMode) {
+      notifyUser({
+        tone: "info",
+        title: "Deletion is unavailable in the demo",
+        message: "Demo data is temporary and is cleared automatically.",
+      });
+      return;
+    }
+    setShowDeleteDataConfirm(true);
+  }
+
+  async function confirmDeleteAllMyData() {
+    if (isDeletingData) return;
+    setIsDeletingData(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/user/delete-data`,
+        apiFetchOptions({ method: "POST" }),
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Failed (${res.status})`);
+      }
+      setShowDeleteDataConfirm(false);
+      notifyUser({
+        tone: "success",
+        title: "Your data was deleted",
+        message: "Server data and this device's CanvasSync cache were deleted. You are being signed out.",
+      });
+      clearAllLocalCanvasSyncData();
+      await new Promise((resolve) => window.setTimeout(resolve, 650));
+      await logout();
+    } catch (err) {
+      notifyUser({
+        tone: "error",
+        title: "Couldn’t delete your data",
+        message: err?.message || String(err),
+        actionLabel: "Try again",
+        onAction: () => {
+          void confirmDeleteAllMyData();
+        },
+        duration: null,
+      });
+    } finally {
+      setIsDeletingData(false);
+    }
   }
 
   async function syncCourse(courseIdInput) {
@@ -2529,26 +2890,47 @@ function App() {
       ? derivedCourseCode
       : (courseMeta?.name || `Course ${courseId}`);
     const syncToastId = `sync-live-status-${courseId || "unknown"}`;
+    const syncWarnings = [];
 
     // In cloud mode, the Canvas token is stored server-side. A missing client-side token
     // is not necessarily an error, as long as we have saved credentials on the backend.
     if (!isDemoMode && !baseUrl && !token) {
-      alert("Please connect to Canvas first");
+      notifyUser({
+        tone: "error",
+        title: "Canvas is not connected",
+        message: "Open Account options and connect Canvas before syncing.",
+        duration: null,
+      });
       return;
     }
 
-    // Get fresh auth token for API calls
-    const authToken = isDemoMode
-      ? (demoSession?.token || getDemoToken())
-      : await getAuthToken();
-    if (!authToken) {
-      alert(isDemoMode ? "Demo session expired. Refresh /demo to try again." : "Please sign in first");
+    if (!isDemoMode && !isAuthenticated()) {
+      notifyUser({
+        tone: "error",
+        title: "Sign in required",
+        message: "Sign in with Canvas before syncing your courses.",
+        duration: null,
+      });
       return;
     }
-    const authHeaders = {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${authToken}`
-    };
+    if (isDemoMode && !demoSession?.token && !getDemoToken()) {
+      notifyUser({
+        tone: "error",
+        title: "Demo session expired",
+        message: "Reload the demo to start a fresh session.",
+        actionLabel: "Reload",
+        onAction: () => window.location.reload(),
+        duration: null,
+      });
+      return;
+    }
+
+    const syncFetchOptions = (body) =>
+      apiFetchOptions({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
 
     setIsSyncing(true);
     setSyncingCourseId(courseId);
@@ -2561,65 +2943,68 @@ function App() {
         return next;
       });
     };
-    updateGroupedSyncStatus("Syncing materials...");
+    setSyncWarningsByCourse((prev) => {
+      const next = { ...(prev || {}) };
+      for (const groupedId of groupedCourseIds) {
+        delete next[groupedId];
+      }
+      return next;
+    });
+    updateGroupedSyncStatus("Reading course materials");
 
     try {
-      await pushSyncPromiseToast(async () => {
-        updateGroupedSyncStatus("Fetching syllabus & schedule files...");
+      await runWithSyncFeedback(async () => {
+        updateGroupedSyncStatus("Reading course materials");
 
-        let totalMaterialsExtracted = 0;
         for (const groupedId of groupedCourseIds) {
           const materialsRes = await fetchSyncWithRetry(
             `${API_BASE}/api/sync_course_materials`,
-            {
-              method: "POST",
-              headers: authHeaders,
-              body: JSON.stringify({
-                base_url: baseUrl,
-                token,
-                course_id: groupedId,
-              }),
-            }
+            syncFetchOptions({
+              base_url: baseUrl,
+              token,
+              course_id: groupedId,
+            }),
           );
 
           if (!materialsRes.ok) {
             throw new Error(await readSyncErrorMessage(materialsRes, "Failed to sync materials"));
           }
-          const materialsData = await materialsRes.json();
-          totalMaterialsExtracted += Number(materialsData?.materials_extracted || 0);
         }
 
-        updateGroupedSyncStatus(`Found ${totalMaterialsExtracted} materials`);
+        updateGroupedSyncStatus("Reading course materials");
 
         try {
-          await fetchSyncWithRetry(`${API_BASE}/api/sync_announcements`, {
-            method: "POST",
-            headers: authHeaders,
-            body: JSON.stringify({
+          await fetchSyncWithRetry(
+            `${API_BASE}/api/sync_announcements`,
+            syncFetchOptions({
               base_url: baseUrl,
               token,
               course_ids: groupedCourseIds,
             }),
-          });
+          );
         } catch (annErr) {
           console.warn("Announcement sync failed (non-fatal):", annErr);
+          syncWarnings.push("Announcements could not be refreshed. Assignment and syllabus sync continued.");
+          setSyncWarningsByCourse((prev) => {
+            const next = { ...(prev || {}) };
+            for (const groupedId of groupedCourseIds) {
+              next[groupedId] = "Announcements could not be refreshed; timeline sync continued.";
+            }
+            return next;
+          });
         }
 
-        updateGroupedSyncStatus("Syncing assignments...");
+        updateGroupedSyncStatus("Syncing assignments");
 
         const initialAssignmentsByCourse = {};
         for (const groupedId of groupedCourseIds) {
           const assignmentsRes = await fetchSyncWithRetry(
             `${API_BASE}/api/sync_assignments`,
-            {
-              method: "POST",
-              headers: authHeaders,
-              body: JSON.stringify({
-                base_url: baseUrl,
-                token,
-                course_id: groupedId,
-              }),
-            }
+            syncFetchOptions({
+              base_url: baseUrl,
+              token,
+              course_id: groupedId,
+            }),
           );
 
           if (!assignmentsRes.ok) {
@@ -2633,23 +3018,23 @@ function App() {
               : [];
         }
 
-        updateGroupedSyncStatus("Resolving dates with AI...");
+        updateGroupedSyncStatus("Matching dates from materials");
 
         const resolveRes = await fetchSyncWithRetry(
           `${API_BASE}/api/resolve_course_dates`,
-          {
-            method: "POST",
-            headers: authHeaders,
-            body: JSON.stringify({
-              course_id: courseId,
-              course_timezone: COURSE_TIMEZONE,
-            }),
-          },
+          syncFetchOptions({
+            course_id: courseId,
+            course_timezone: COURSE_TIMEZONE,
+          }),
           { timeoutMs: AI_RESOLVE_TIMEOUT_MS },
         );
 
         if (!resolveRes.ok) {
-          throw new Error(await readSyncErrorMessage(resolveRes, "Failed to resolve course dates"));
+          const resolveErr = await readSyncErrorMessage(resolveRes, "Failed to resolve course dates");
+          if (resolveRes.status === 403 && /consent/i.test(resolveErr)) {
+            setLegalConsentAccepted(false);
+          }
+          throw new Error(resolveErr);
         }
 
         const previousCourseItems = groupedCourseIds.flatMap((groupedId) => (
@@ -2664,7 +3049,7 @@ function App() {
             const discoveredKey = normalizeAssignmentToken(a.discovered_key ?? a.discoveredKey ?? a.dk).toLowerCase();
             const stableToken = assignmentId || (discoveredKey ? `disc:${discoveredKey}` : "");
             const nameValue = a.nam ?? a.name ?? "";
-            const dueValue = a.due ?? a.normalized_due_at ?? a.due_at ?? a.original_due_at ?? null;
+            const dueValue = a.due ?? a.normalizedDueAt ?? a.originalDueAt ?? a.normalized_due_at ?? a.due_at ?? a.original_due_at ?? null;
 
             return {
               id: buildAssignmentStableId(targetCourseId, stableToken, nameValue, dueValue),
@@ -2678,17 +3063,19 @@ function App() {
               due: dueValue,
 
               status: a.st ?? a.status ?? null,
+              sourceOfTruth: a.sourceOfTruth ?? a.source_of_truth ?? a.source ?? null,
               category: normalizeCategoryForViews(a.cat ?? a.category),
             };
           });
           return dedupeAssignmentsWithinCourse(mapped);
         };
 
-        updateGroupedSyncStatus("Loading resolved assignments...");
+        updateGroupedSyncStatus("Updating timeline");
 
-        const cachedRes = await fetchSyncWithRetry(`${API_BASE}/api/user/assignments?lite=1`, {
-          headers: authHeaders,
-        });
+        const cachedRes = await fetchSyncWithRetry(
+          `${API_BASE}/api/user/assignments?lite=1`,
+          apiFetchOptions(),
+        );
         if (!cachedRes.ok) {
           throw new Error(await readSyncErrorMessage(cachedRes, "Failed to load resolved assignments"));
         }
@@ -2775,7 +3162,7 @@ function App() {
           });
         }
 
-        updateGroupedSyncStatus("Sync Complete");
+        updateGroupedSyncStatus(syncWarnings.length > 0 ? "Sync complete with a warning" : "Sync complete");
 
         // Auto-assign random color if course doesn't have one yet (avoiding duplicates)
         setCourseColors(prev => {
@@ -2805,20 +3192,39 @@ function App() {
 
         return {
           itemCount: mergedNormalizedAssignments.length,
+          warning: syncWarnings[0] || "",
         };
       }, {
         id: syncToastId,
         loadingTitle: `Syncing ${classCodeLabel}`,
         successTitle: `Synced ${classCodeLabel}`,
-        errorTitle: `Sync Failed for ${classCodeLabel}`,
+        successDescription: (data) => data?.warning
+          ? data.warning
+          : `${data?.itemCount || 0} ${data?.itemCount === 1 ? "item is" : "items are"} ready in your timeline.`,
+        successTone: (data) => data?.warning ? "warning" : "success",
+        errorTitle: `Couldn’t sync ${classCodeLabel}`,
         errorDescription: (err) => err?.message || String(err),
+        errorActionLabel: "Try again",
+        onErrorAction: () => {
+          setSyncQueue((prev) => {
+            const existing = new Set((prev || []).map((id) => normalizeCourseId(id)));
+            if (existing.has(courseId)) return prev;
+            return [...(prev || []), courseId];
+          });
+          setSyncStartedAt(new Date().toISOString());
+          setSyncRunTotal(1);
+          setSyncRunCompleted(0);
+          setSyncStatus((prev) => ({ ...(prev || {}), [courseId]: "Queued" }));
+          setSyncWarningsByCourse((prev) => {
+            const next = { ...(prev || {}) };
+            delete next[courseId];
+            return next;
+          });
+        },
       });
     } catch (err) {
       console.error("Sync failed", err);
-      setSyncStatus((prev) => ({
-        ...prev,
-        [courseId]: `Sync Failed: ${err?.message || String(err)}`,
-      }));
+      updateGroupedSyncStatus(`Sync failed: ${err?.message || String(err)}`);
     } finally {
       setSyncRunCompleted((prev) => prev + 1);
       setIsSyncing(false);
@@ -2925,6 +3331,17 @@ function App() {
     })
     .sort((a, b) => toTime(a.due) - toTime(b.due)), [allItems, weekStart, weekEnd, weeklyFilters]);
 
+  const unfilteredWeekItems = useMemo(() => allItems
+    .filter((item) => {
+      const due = parseDueToDate(item.due);
+      return Boolean(due && due >= weekStart && due <= addDays(weekEnd, 1));
+    })
+    .sort((a, b) => toTime(a.due) - toTime(b.due)), [allItems, weekEnd, weekStart]);
+
+  const filtersHideAllWeekItems = hasDisabledWeeklyFilters
+    && weekItems.length === 0
+    && unfilteredWeekItems.length > 0;
+
 
   const getLinkedItemIds = useCallback((item) => {
     const ids = [
@@ -2945,100 +3362,6 @@ function App() {
   // Calculate progress
   const completedThisWeek = weekItems.filter((item) => isItemCompleted(item)).length;
   const progressPercent = weekItems.length > 0 ? (completedThisWeek / weekItems.length) * 100 : 0;
-
-  // Confetti - using canvas-confetti library
-  const progressBarRef = useRef(null);
-  const prevProgressRef = useRef(progressPercent);
-
-  // Fire confetti explosion from progress bar
-  const fireConfetti = useCallback(() => {
-    // Load canvas-confetti from CDN if not already loaded
-    if (!window.confetti) {
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js';
-      script.onload = () => fireConfettiBurst();
-      document.head.appendChild(script);
-    } else {
-      fireConfettiBurst();
-    }
-  }, []);
-
-  const fireConfettiBurst = useCallback(() => {
-    if (!window.confetti || !progressBarRef.current) return;
-
-    const rect = progressBarRef.current.getBoundingClientRect();
-    const originX = (rect.left + rect.width / 2) / window.innerWidth;
-    const originY = (rect.top + rect.height * 0.3) / window.innerHeight;
-
-    const defaults = {
-      origin: { x: originX, y: originY },
-      colors: ['#22c55e', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444', '#ec4899'],
-      zIndex: 9999,
-      disableForReducedMotion: true,
-    };
-
-    // Burst 1: Upward fan
-    window.confetti({
-      ...defaults,
-      particleCount: 30,
-      spread: 60,
-      angle: 90,
-      startVelocity: 45,
-      gravity: 1.2,
-      scalar: 0.9,
-      ticks: 150,
-    });
-
-    // Burst 2: Left spray (delayed)
-    setTimeout(() => {
-      window.confetti({
-        ...defaults,
-        particleCount: 20,
-        spread: 50,
-        angle: 120,
-        startVelocity: 35,
-        gravity: 1,
-        scalar: 0.8,
-        ticks: 120,
-      });
-    }, 100);
-
-    // Burst 3: Right spray (delayed)
-    setTimeout(() => {
-      window.confetti({
-        ...defaults,
-        particleCount: 20,
-        spread: 50,
-        angle: 60,
-        startVelocity: 35,
-        gravity: 1,
-        scalar: 0.8,
-        ticks: 120,
-      });
-    }, 100);
-
-    // Burst 4: Small follow-up poof
-    setTimeout(() => {
-      window.confetti({
-        ...defaults,
-        particleCount: 15,
-        spread: 100,
-        angle: 90,
-        startVelocity: 20,
-        gravity: 0.8,
-        scalar: 0.6,
-        ticks: 100,
-      });
-    }, 250);
-  }, []);
-
-  // Trigger confetti when progress reaches 100%
-  useEffect(() => {
-    if (progressPercent === 100 && prevProgressRef.current < 100 && weekItems.length > 0) {
-      fireConfetti();
-    }
-    prevProgressRef.current = progressPercent;
-  }, [progressPercent, weekItems.length, fireConfetti]);
 
   // Group items by day for weekly todo view
   const itemsByDay = useMemo(() => {
@@ -3066,6 +3389,35 @@ function App() {
     return grouped;
   }, [weekDates, weekItems]);
 
+  const mobileSelectedWeekDate = useMemo(() => {
+    const today = new Date();
+    const todayInWeek = weekDates.find((date) => isSameDay(date, today));
+    const fallbackDate = todayInWeek || weekDates[0];
+    return weekDates.find((date) => date.toDateString() === mobileSelectedWeekKey) || fallbackDate;
+  }, [mobileSelectedWeekKey, weekDates]);
+
+  const mobileSelectedDayName = mobileSelectedWeekDate.toLocaleDateString('en-US', { weekday: 'long' });
+  const mobileSelectedDayItems = itemsByDay[mobileSelectedDayName]?.items || [];
+  const mobileSelectedDayCompleted = mobileSelectedDayItems.filter((item) => isItemCompleted(item)).length;
+  const mobileUpcomingWeekItems = useMemo(() => {
+    const selectedEnd = new Date(
+      mobileSelectedWeekDate.getFullYear(),
+      mobileSelectedWeekDate.getMonth(),
+      mobileSelectedWeekDate.getDate() + 1,
+      0,
+      0,
+      0,
+      0,
+    );
+    return weekItems
+      .filter((item) => {
+        const due = parseDueToDate(item.due);
+        if (!due) return false;
+        return due >= selectedEnd;
+      })
+      .slice(0, 3);
+  }, [mobileSelectedWeekDate, weekItems]);
+
   const toggleComplete = (item) => {
     const completionIds = getLinkedItemIds(item);
     if (!completionIds.length) return;
@@ -3082,8 +3434,8 @@ function App() {
         }
       }
 
-      // Cross-browser persistence (Firestore) is best-effort and debounced.
-      if (firebaseUser?.uid) {
+      // Server-side preference persistence is best-effort and debounced.
+      if (canvasUser?.uid) {
         persistCompletedItemsDebounced(next);
       }
       return next;
@@ -3132,14 +3484,626 @@ function App() {
     return itemsByDateStr[date.toDateString()] || [];
   }, [itemsByDateStr]);
 
+  const mobileMonthAgenda = useMemo(() => {
+    const days = [];
+    const cursor = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
+    const month = currentMonth.getMonth();
+
+    while (cursor.getMonth() === month) {
+      const items = getItemsForDate(cursor);
+      if (items.length > 0) {
+        days.push({
+          date: new Date(cursor),
+          items,
+        });
+      }
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    return days;
+  }, [currentMonth, getItemsForDate]);
+
+  const unfilteredMobileMonthItemCount = useMemo(() => allItems.filter((item) => {
+    const due = parseDueToDate(item.due);
+    if (!due) return false;
+    return due.getFullYear() === currentMonth.getFullYear()
+      && due.getMonth() === currentMonth.getMonth();
+  }).length, [allItems, currentMonth]);
+
+  const filtersHideAllMonthItems = hasDisabledWeeklyFilters
+    && mobileMonthAgenda.length === 0
+    && unfilteredMobileMonthItemCount > 0;
+
+  const mobileActiveTitle = activeTab === "calendar"
+    ? "Calendar"
+    : activeTab === "classSettings"
+      ? (isEditingSyncClasses ? "Select classes" : "Classes")
+      : activeTab === "course"
+        ? (selectedCourse?.courseCode || "Course")
+        : "This week";
+  const mobileActiveEyebrow = activeTab === "calendar"
+    ? "Month agenda"
+    : activeTab === "classSettings"
+      ? "Sync selection"
+      : activeTab === "course"
+        ? "Class timeline"
+        : "Weekly plan";
+
+  const renderMobileFilters = () => (
+    <div className="flex gap-2 overflow-x-auto pb-1">
+      {Object.keys(weeklyFilters).map((cat) => {
+        const isActive = weeklyFilters[cat] !== false;
+        const label = cat === "EXAM" ? "Exams" : cat.charAt(0) + cat.slice(1).toLowerCase();
+        return (
+          <button
+            key={cat}
+            type="button"
+            onClick={() => toggleFilter(cat)}
+            aria-pressed={isActive}
+            className={`shrink-0 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${isActive
+              ? "border-blue-500/45 bg-blue-500/15 text-blue-100"
+              : "border-zinc-800 bg-zinc-950 text-zinc-500"
+              }`}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  const renderMobileTaskItem = (item, rowKey = item.id) => {
+    const isCompleted = isItemCompleted(item);
+    const deadlineMeta = getDeadlineMeta(item, isCompleted);
+    const subjectLabel = deriveCourseCode(item.courseCode, item.courseName || "");
+    const categoryLabel = normalizeCategoryForViews(item.category) === "EXAM" ? "Exam" : "Assignment";
+    const itemStatus = String(item.status || "").trim().toUpperCase();
+    const hasDueDate = Boolean(parseDueToDate(item.due));
+    const attentionLabel = !isCompleted && itemStatus === "CONFLICT"
+      ? "Review"
+      : !isCompleted && !hasDueDate
+        ? "No date"
+        : !isCompleted && deadlineMeta.label === "Overdue"
+          ? "Overdue"
+          : "";
+    const attentionClass = attentionLabel === "Overdue"
+      ? "text-red-300"
+      : attentionLabel === "Review"
+        ? "text-amber-300"
+        : "text-zinc-500";
+    const titleClass = isCompleted
+      ? "text-zinc-500 line-through decoration-zinc-600"
+      : deadlineMeta.label === "Overdue"
+        ? "text-white"
+        : "text-zinc-100";
+
+    return (
+      <li
+        key={rowKey}
+        className={`rounded-lg border border-zinc-800 bg-zinc-950/75 px-3 py-3 transition-[opacity,background-color,border-color] duration-200 ${isCompleted ? "opacity-70" : ""}`}
+      >
+        <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-3">
+          <button
+            type="button"
+            onClick={() => toggleComplete(item)}
+            aria-label={isCompleted ? `Mark ${item.name} incomplete` : `Mark ${item.name} complete`}
+            className={`grid h-10 w-10 shrink-0 place-items-center rounded-full border transition-[background-color,border-color,color] duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500/70 ${isCompleted
+              ? "border-green-500/35 bg-green-500/10 text-green-300"
+              : "border-zinc-700 bg-zinc-900 text-zinc-500"
+              }`}
+          >
+            {isCompleted ? <CheckCircle2 size={21} className="od-mobile-check-pop" /> : <Circle size={21} />}
+          </button>
+
+          <div className="min-w-0">
+            <div className="flex items-start justify-between gap-3">
+              <p className={`min-w-0 text-[15px] font-semibold leading-snug ${titleClass}`}>{item.name}</p>
+              <span className={`shrink-0 pt-0.5 text-sm font-semibold tabular-nums ${deadlineMeta.tone}`}>
+                {formatMobileDueLabel(item.due)}
+              </span>
+            </div>
+
+            <div className="mt-2 flex min-w-0 items-center gap-2 text-[11px] font-medium text-zinc-500">
+              <span className="min-w-0 truncate font-semibold uppercase text-zinc-300">
+                {subjectLabel && subjectLabel !== "UNK" ? subjectLabel : "UNK"}
+              </span>
+              <span className="text-zinc-700">/</span>
+              <span className="shrink-0 text-zinc-400">{categoryLabel}</span>
+              {attentionLabel ? (
+                <span className={`ml-auto shrink-0 font-semibold ${attentionClass}`}>
+                  {attentionLabel}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </li>
+    );
+  };
+
+  const renderMobileWeeklyView = () => {
+    const selectedDayCue = getDayLabel(mobileSelectedWeekDate);
+    const selectedDateLabel = mobileSelectedWeekDate.toLocaleDateString('en-US', {
+      weekday: 'long',
+      month: 'short',
+      day: 'numeric',
+    });
+
+    return (
+      <section key={`week-${weekDates[0].toDateString()}`} className="space-y-4 od-mobile-content-enter">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950/85 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase text-zinc-500">Week plan</p>
+              <h1 className="mt-1 whitespace-nowrap text-xl font-semibold text-zinc-100">
+                {formatMobileWeekRange(weekDates[0], weekDates[6])}
+              </h1>
+            </div>
+            <div className="flex shrink-0 items-center gap-1 rounded-lg border border-zinc-800 bg-black p-1">
+              <button type="button" onClick={() => navigateWeek(-1)} className="grid h-9 w-9 place-items-center rounded-md text-zinc-400 hover:bg-zinc-900 hover:text-white" aria-label="Previous week">
+                <ChevronLeft size={18} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const today = new Date();
+                  setCurrentWeekStart(today);
+                  setMobileSelectedWeekKey(today.toDateString());
+                }}
+                className="h-9 rounded-md px-3 text-xs font-semibold text-blue-200 hover:bg-blue-500/10"
+              >
+                Today
+              </button>
+              <button type="button" onClick={() => navigateWeek(1)} className="grid h-9 w-9 place-items-center rounded-md text-zinc-400 hover:bg-zinc-900 hover:text-white" aria-label="Next week">
+                <ChevronRight size={18} />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <div className="mb-1.5 flex items-center justify-between text-xs">
+              <span className="text-zinc-400">{completedThisWeek} of {weekItems.length} complete</span>
+              <span className={progressPercent === 100 ? "font-semibold text-green-300" : "font-semibold text-blue-300"}>{Math.round(progressPercent)}%</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full border border-zinc-800 bg-black">
+              <div
+                className={`h-full transition-all duration-300 ${progressPercent === 100 ? "bg-green-500" : "bg-blue-500"}`}
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {renderMobileFilters()}
+
+        {weekItems.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/70 px-5 py-8 text-center">
+            <p className="text-base font-medium text-zinc-200">
+              {filtersHideAllWeekItems ? "No items match these filters." : "No dated assignments this week."}
+            </p>
+            <p className="mt-2 text-sm text-zinc-500">
+              {filtersHideAllWeekItems
+                ? "Turn the hidden category back on to see the work already in this week."
+                : selectedSyncCourseCount > 0
+                  ? "Synced courses with due dates will appear here after the next refresh."
+                  : "Select classes, then run Sync to build your timeline."}
+            </p>
+            {filtersHideAllWeekItems ? (
+              <button
+                type="button"
+                onClick={resetWeeklyFilters}
+                className="mt-4 rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-2 text-sm font-semibold text-zinc-300"
+              >
+                Show all categories
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-7 gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950/85 p-2">
+              {weekDates.map((date) => {
+                const dayName = date.toLocaleDateString('en-US', { weekday: 'long' });
+                const dayItems = itemsByDay[dayName]?.items || [];
+                const completedCount = dayItems.filter((item) => isItemCompleted(item)).length;
+                const isSelected = isSameDay(date, mobileSelectedWeekDate);
+                const isToday = isSameDay(date, new Date());
+                return (
+                  <button
+                    key={date.toDateString()}
+                    type="button"
+                    onClick={() => setMobileSelectedWeekKey(date.toDateString())}
+                    className={`min-h-[74px] rounded-lg border px-1.5 py-2 text-center transition-[background-color,border-color,color] duration-150 ${isSelected
+                      ? "border-blue-500/45 bg-blue-500/15 text-blue-100"
+                      : "border-zinc-800 bg-black text-zinc-500"
+                      }`}
+                    aria-pressed={isSelected}
+                  >
+                    <span className="block text-[10px] font-semibold uppercase leading-none">
+                      {date.toLocaleDateString('en-US', { weekday: 'short' })}
+                    </span>
+                    <span className={`mt-1 grid h-7 w-7 place-items-center rounded-full text-sm font-semibold ${isToday ? "mx-auto bg-blue-600 text-white" : "mx-auto"}`}>
+                      {date.getDate()}
+                    </span>
+                    <span className="mt-1 flex items-center justify-center gap-0.5">
+                      {dayItems.length > 0 ? (
+                        Array.from({ length: Math.min(dayItems.length, 3) }).map((_, idx) => (
+                          <span key={idx} className={`h-1.5 w-1.5 rounded-full ${completedCount > idx ? "bg-green-500" : "bg-blue-500"}`} />
+                        ))
+                      ) : (
+                        <span className="h-1.5 w-1.5 rounded-full bg-zinc-700" />
+                      )}
+                    </span>
+                    <span className="mt-1 block text-[10px] font-medium tabular-nums">
+                      {completedCount}/{dayItems.length}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <section
+              key={`selected-day-${mobileSelectedWeekDate.toDateString()}`}
+              className="rounded-lg border border-zinc-800 bg-zinc-950/85 p-4 od-mobile-content-enter"
+              aria-label={selectedDateLabel}
+            >
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h2 className="truncate text-lg font-semibold text-zinc-100">{selectedDateLabel}</h2>
+                    {selectedDayCue ? (
+                      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${selectedDayCue === "Past due" ? "border-red-500/35 bg-red-500/10 text-red-200" : selectedDayCue === "Today" ? "border-blue-500/35 bg-blue-500/10 text-blue-200" : "border-amber-500/35 bg-amber-500/10 text-amber-200"}`}>
+                        {selectedDayCue}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    {mobileSelectedDayCompleted} of {mobileSelectedDayItems.length} due items complete
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-lg border border-zinc-800 bg-black px-2.5 py-1 text-xs font-semibold text-zinc-400">
+                  {mobileSelectedDayItems.length} due
+                </span>
+              </div>
+
+              {mobileSelectedDayItems.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/70 px-4 py-6 text-center">
+                  <p className="text-sm font-medium text-zinc-200">No assignments due this day.</p>
+                  <p className="mt-1 text-xs text-zinc-500">Use the week strip to check another day.</p>
+                </div>
+              ) : (
+                <ul className="space-y-2">
+                  {mobileSelectedDayItems.map((item) => renderMobileTaskItem(item))}
+                </ul>
+              )}
+            </section>
+
+            {mobileUpcomingWeekItems.length > 0 ? (
+              <section aria-label="Upcoming this week">
+                <div className="mb-2 flex items-center justify-between px-0.5">
+                  <h2 className="text-sm font-semibold text-zinc-200">Next in this week</h2>
+                  <span className="text-xs text-zinc-600">after selected day</span>
+                </div>
+                <ul className="space-y-2">
+                  {mobileUpcomingWeekItems.map((item) => renderMobileTaskItem(item, `upcoming-${item.id}`))}
+                </ul>
+              </section>
+            ) : null}
+          </>
+        )}
+      </section>
+    );
+  };
+
+  const renderMobileCalendarView = () => (
+    <section key={`month-${currentMonth.getFullYear()}-${currentMonth.getMonth()}`} className="space-y-4 od-mobile-content-enter">
+      <div className="rounded-lg border border-zinc-800 bg-zinc-950/85 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase text-zinc-500">Month</p>
+            <h1 className="mt-1 text-xl font-semibold text-zinc-100">
+              {currentMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+            </h1>
+          </div>
+          <div className="flex shrink-0 items-center gap-1 rounded-lg border border-zinc-800 bg-black p-1">
+            <button type="button" onClick={() => navigateMonth(-1)} className="grid h-9 w-9 place-items-center rounded-md text-zinc-400 hover:bg-zinc-900 hover:text-white" aria-label="Previous month">
+              <ChevronLeft size={18} />
+            </button>
+            <button type="button" onClick={() => setCurrentMonth(new Date())} className="h-9 rounded-md px-3 text-xs font-semibold text-blue-200 hover:bg-blue-500/10">
+              Today
+            </button>
+            <button type="button" onClick={() => navigateMonth(1)} className="grid h-9 w-9 place-items-center rounded-md text-zinc-400 hover:bg-zinc-900 hover:text-white" aria-label="Next month">
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {renderMobileFilters()}
+
+      {mobileMonthAgenda.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/70 px-5 py-8 text-center">
+          <p className="text-base font-medium text-zinc-200">
+            {filtersHideAllMonthItems ? "No items match these filters." : "No dated items this month."}
+          </p>
+          <p className="mt-2 text-sm text-zinc-500">
+            {filtersHideAllMonthItems
+              ? "Turn the hidden category back on to restore this month’s agenda."
+              : "Try another month or sync your selected classes."}
+          </p>
+          {filtersHideAllMonthItems ? (
+            <button
+              type="button"
+              onClick={resetWeeklyFilters}
+              className="mt-4 rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-2 text-sm font-semibold text-zinc-300"
+            >
+              Show all categories
+            </button>
+          ) : null}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {mobileMonthAgenda.map(({ date, items }) => {
+            const dayCue = getDayLabel(date);
+            const isToday = isSameDay(date, new Date());
+            return (
+              <section key={date.toDateString()}>
+                <div className="mb-2 flex items-center justify-between gap-3 px-0.5">
+                  <div className="flex items-center gap-3">
+                    <span className={`grid h-11 w-11 place-items-center rounded-lg border text-base font-semibold ${isToday ? "border-blue-500/45 bg-blue-500/15 text-blue-100" : "border-zinc-800 bg-zinc-950 text-zinc-300"}`}>
+                      {date.getDate()}
+                    </span>
+                    <div>
+                      <p className="text-sm font-semibold text-zinc-200">
+                        {date.toLocaleDateString('en-US', { weekday: 'long' })}
+                      </p>
+                      <p className="text-xs text-zinc-600">
+                        {date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                      </p>
+                    </div>
+                  </div>
+                  {dayCue && dayCue !== "Past due" ? (
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${dayCue === "Past due" ? "border-red-500/35 bg-red-500/10 text-red-200" : dayCue === "Today" ? "border-blue-500/35 bg-blue-500/10 text-blue-200" : "border-amber-500/35 bg-amber-500/10 text-amber-200"}`}>
+                      {dayCue}
+                    </span>
+                  ) : null}
+                </div>
+                <ul className="space-y-2">
+                  {items.map((item) => renderMobileTaskItem(item, `${date.toDateString()}-${item.id}`))}
+                </ul>
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+
+  const renderMobileClassSettingsView = () => (
+    <section className="space-y-4 od-mobile-content-enter">
+      {!isEditingSyncClasses ? (
+        <>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950/85 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase text-zinc-500">Selected classes</p>
+                <h1 className="mt-1 text-xl font-semibold text-zinc-100">
+                  {selectedSyncCourseCount > 0 ? `${selectedSyncCourseCount} ready to sync` : "Choose classes"}
+                </h1>
+              </div>
+              <button
+                type="button"
+                onClick={startEditingSyncClasses}
+                className="shrink-0 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+              >
+                {selectedSyncCourseCount === 0 ? "Select" : "Edit"}
+              </button>
+            </div>
+          </div>
+
+          {syncEnabledCourseList.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/70 px-5 py-8 text-center text-sm text-zinc-500">
+              Your selected classes will appear here.
+            </div>
+          ) : (
+            <ul className="space-y-2">
+              {syncEnabledCourseList.map((course) => (
+                <li key={course.id} className={`rounded-lg border px-3 py-3 ${course.isCurrentlyActive ? "border-zinc-800 bg-zinc-950/85" : "border-zinc-900 bg-zinc-950/50 opacity-70"}`}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedCourseId(course.id);
+                      setActiveTab("course");
+                    }}
+                    className="flex w-full items-center justify-between gap-3 text-left"
+                  >
+                    <span className="min-w-0">
+                      <span
+                        className={`mb-1 inline-flex rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${getCourseColorClasses(getEffectiveCourseColor(course.id, course.courseCode, course.name)).tag}`}
+                      >
+                        {(course.courseCode || "UNK").toUpperCase()}
+                      </span>
+                      <span className="block truncate text-sm font-semibold text-zinc-100">{course.name}</span>
+                    </span>
+                    <ChevronRight size={18} className="shrink-0 text-zinc-500" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950/85 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase text-zinc-500">Class picker</p>
+                <h1 className="mt-1 text-xl font-semibold text-zinc-100">{draftSelectedCount} selected</h1>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={cancelEditingSyncClasses}
+                  className="rounded-lg border border-zinc-700 px-3 py-2 text-sm font-semibold text-zinc-300 hover:bg-zinc-900"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={completeEditingSyncClasses}
+                  className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                >
+                  {draftSelectedCount > 0 ? "Save" : "Clear"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {allCourseList.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/70 px-5 py-8 text-center text-sm text-zinc-500">
+              No classes available.
+            </div>
+          ) : (
+            <ul className="space-y-2">
+              {allCourseList.map((course) => {
+                const isSelected = !!syncEnabledDraft[normalizeCourseId(course.id)];
+                const isActive = !!course.isCurrentlyActive;
+                return (
+                  <li key={course.id}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSyncCourseInDraft(course.id)}
+                      aria-pressed={isSelected}
+                      className={`grid w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-lg border px-3 py-3 text-left transition-colors ${isSelected
+                        ? "border-blue-500/45 bg-blue-500/15"
+                        : isActive
+                          ? "border-zinc-800 bg-zinc-950/85"
+                          : "border-zinc-900 bg-zinc-950/50 opacity-70"
+                        }`}
+                    >
+                      {isSelected ? (
+                        <CheckCircle2 size={22} className="text-blue-300" />
+                      ) : (
+                        <Circle size={22} className={isActive ? "text-zinc-500" : "text-zinc-700"} />
+                      )}
+                      <span className="min-w-0">
+                        <span
+                          className={`mb-1 inline-flex rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${getCourseColorClasses(getEffectiveCourseColor(course.id, course.courseCode, course.name)).tag}`}
+                        >
+                          {(course.courseCode || "UNK").toUpperCase()}
+                        </span>
+                        <span className="block truncate text-sm font-semibold text-zinc-100">{course.name}</span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
+  );
+
+  const renderMobileCourseView = () => (
+    <section className="space-y-4 od-mobile-content-enter">
+      <button
+        type="button"
+        onClick={() => setActiveTab("classSettings")}
+        className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-semibold text-zinc-300"
+      >
+        <ChevronLeft size={16} />
+        Classes
+      </button>
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-950/85 p-4">
+        <p className="text-xs font-semibold uppercase text-zinc-500">Course</p>
+        <h1 className="mt-1 text-xl font-semibold text-zinc-100">
+          {selectedCourse ? selectedCourse.name : "Select a course"}
+        </h1>
+        {currentSyncStatus ? (
+          <div className={`mt-3 rounded-lg border px-3 py-2 text-sm font-medium ${String(currentSyncStatus).toLowerCase().includes("warning")
+            ? "border-amber-500/35 bg-amber-500/10 text-amber-300"
+            : String(currentSyncStatus).toLowerCase().includes("complete")
+              ? "border-green-900 bg-green-950 text-green-300"
+            : String(currentSyncStatus).toLowerCase().includes("fail")
+              ? "border-red-900 bg-red-950 text-red-300"
+              : "border-blue-900 bg-blue-950 text-blue-300"
+            }`}>
+            <p>{currentSyncStatus}</p>
+            {String(currentSyncStatus).toLowerCase().includes("fail") && selectedCourse ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const queuedCourseIds = queueSyncCourses([selectedCourse.id]);
+                  if (queuedCourseIds.length) {
+                    setSyncRunTotal(queuedCourseIds.length);
+                    setSyncRunCompleted(0);
+                  }
+                }}
+                className="mt-2 rounded-md border border-current px-2.5 py-1.5 text-xs font-semibold"
+              >
+                Try sync again
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      {selectedCourse && !selectedCourseIsSynced ? (
+        <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/70 px-5 py-8 text-center">
+          <p className="text-sm text-zinc-500">This class has not been synced yet.</p>
+          <button
+            type="button"
+            onClick={() => setActiveTab("classSettings")}
+            className="mt-4 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white"
+          >
+            Open Classes
+          </button>
+        </div>
+      ) : sortedCourseItems.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/70 px-5 py-8 text-center text-sm text-zinc-500">
+          No course items synced yet.
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {sortedCourseItems.map((item, idx) => {
+            const categoryLabel = normalizeCategoryForViews(item.category) === "EXAM" ? "Exam" : "Assignment";
+            const statusLabel = item.status === "CONFLICT" ? "Review" : "";
+
+            return (
+              <li key={`${item.name}-${idx}`} className="rounded-lg border border-zinc-800 bg-zinc-950/85 px-3 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <p className="min-w-0 text-[15px] font-semibold leading-snug text-zinc-100">{item.name}</p>
+                <span className={`shrink-0 text-xs font-semibold ${item.status === "CONFLICT" ? "text-red-300" : "text-zinc-400"}`}>
+                  {item.due ? (
+                    formatMobileDueLabel(item.due)
+                  ) : "--"}
+                </span>
+              </div>
+              <div className="mt-2 flex items-center gap-2 text-[11px] font-medium text-zinc-500">
+                <span>{categoryLabel}</span>
+                {statusLabel ? (
+                  <span className="ml-auto shrink-0 font-semibold text-amber-300">{statusLabel}</span>
+                ) : null}
+              </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+
   if (isDemoMode && !demoSession && !demoBootstrapFailed) {
     return (
       <>
-        <Toaster position="top-center" offset={16} options={{ fill: "#0b1020", roundness: 12, duration: 2600 }} />
-        <div className="h-screen flex items-center justify-center bg-black text-white">
+        {!isMobileLayout ? (
+          <Toaster position="top-center" offset={16} options={{ fill: "#0b1020", roundness: 12, duration: 2600 }} />
+        ) : null}
+        <div className="flex h-screen items-center justify-center bg-[#f6f7f9] text-[#172033] md:bg-black md:text-white">
           <div className="text-center">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p>Starting demo…</p>
+            <p className="text-sm font-medium">Starting demo...</p>
           </div>
         </div>
       </>
@@ -3149,19 +4113,30 @@ function App() {
   if (isDemoMode && demoBootstrapFailed) {
     return (
       <>
-        <Toaster position="top-center" offset={16} options={{ fill: "#0b1020", roundness: 12, duration: 2600 }} />
-        <div className="h-screen flex flex-col items-center justify-center bg-black text-white px-6">
-          <p className="text-lg font-medium text-zinc-200">Demo is unavailable</p>
-          <p className="mt-2 text-sm text-zinc-500 text-center max-w-sm">
+        {!isMobileLayout ? (
+          <Toaster position="top-center" offset={16} options={{ fill: "#0b1020", roundness: 12, duration: 2600 }} />
+        ) : null}
+        <div className="flex h-screen flex-col items-center justify-center bg-[#f6f7f9] px-6 text-[#172033] md:bg-black md:text-white">
+          <p className="text-lg font-semibold">Demo is unavailable</p>
+          <p className="mt-2 max-w-sm text-center text-sm text-slate-500 md:text-zinc-500">
             The demo sandbox could not start. Check that the backend is running and try again later.
           </p>
-          <button
-            type="button"
-            onClick={handleExitDemo}
-            className="mt-6 px-5 py-2.5 rounded-md bg-zinc-800 border border-zinc-600 text-sm font-medium hover:bg-zinc-700"
-          >
-            Exit demo
-          </button>
+          <div className="mt-6 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExitDemo}
+              className="rounded-lg border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 md:border-zinc-600 md:bg-zinc-800 md:text-zinc-200 md:hover:bg-zinc-700"
+            >
+              Exit demo
+            </button>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+            >
+              Try again
+            </button>
+          </div>
         </div>
       </>
     );
@@ -3171,15 +4146,17 @@ function App() {
   if (authLoading && !isDemoMode) {
     return (
       <>
-        <Toaster
-          position="top-center"
-          offset={16}
-          options={{ fill: "#0b1020", roundness: 12, duration: 2600 }}
-        />
-        <div className="h-screen flex items-center justify-center bg-black text-white">
+        {!isMobileLayout ? (
+          <Toaster
+            position="top-center"
+            offset={16}
+            options={{ fill: "#0b1020", roundness: 12, duration: 2600 }}
+          />
+        ) : null}
+        <div className="flex h-screen items-center justify-center bg-[#f6f7f9] text-[#172033] md:bg-black md:text-white">
           <div className="text-center">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
-            <p>Loading...</p>
+            <p className="text-sm font-medium">Loading CanvasSync...</p>
           </div>
         </div>
       </>
@@ -3187,25 +4164,27 @@ function App() {
   }
 
   // Landing page is for signed-out users on / only — never shown inside /demo
-  if (!isDemoMode && (!firebaseUser || showLandingPage)) {
+  if (!isDemoMode && (!canvasUser || showLandingPage)) {
     return (
       <>
-        <Toaster
-          position="top-right"
-          offset={16}
-          options={{ fill: "#0b1020", roundness: 12, duration: 2600 }}
-        />
-        <div className="h-screen flex flex-col bg-black text-white" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
+        {!isMobileLayout ? (
+          <Toaster
+            position="top-right"
+            offset={16}
+            options={{ fill: "#0b1020", roundness: 12, duration: 2600 }}
+          />
+        ) : null}
+        <div className="mobile-landing h-screen flex flex-col bg-black text-white" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
           {/* Top bar — mirrors the authenticated app header */}
           <header className="h-12 flex items-center justify-between px-5 bg-zinc-950 border-b border-zinc-800 shrink-0">
-            {firebaseUser ? (
+            {canvasUser ? (
               <button onClick={() => setShowLandingPage(false)} aria-label="Return to app">
                 <BrandWordmark height={24} />
               </button>
             ) : (
               <BrandWordmark height={24} />
             )}
-            {firebaseUser ? (
+            {canvasUser ? (
               <button
                 onClick={() => setShowLandingPage(false)}
                 className="text-sm px-3 py-1.5 rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors"
@@ -3223,28 +4202,28 @@ function App() {
           </header>
 
           {/* Main content area — same bg-black as app, no grid/glow effects */}
-          <div className="flex-1 flex items-center justify-center overflow-auto">
-            <main className="w-full max-w-5xl mx-auto px-6 py-12 grid lg:grid-cols-2 gap-12 items-center">
+          <div className="flex-1 flex items-start justify-start overflow-auto lg:items-center lg:justify-center">
+            <main className="w-full max-w-6xl mx-auto px-6 py-10 grid lg:grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)] gap-10 items-center">
               <section>
                 <h1 className="text-3xl md:text-4xl font-semibold leading-tight text-zinc-100">
-                  Every deadline,<br />one place.
+                  See what&rsquo;s due — and where it came from.
                 </h1>
                 <p className="mt-4 text-zinc-400 text-[15px] leading-relaxed max-w-md">
-                  CanvasSync pulls assignments, module items, files, announcements, and syllabus dates from Canvas into a single weekly and calendar view.
+                  CanvasSync turns Canvas-provided assignments and course-material dates into one calm weekly timeline. Canvas items stay labeled. AI-assisted dates stay reviewable.
                 </p>
 
                 <div className="mt-7 flex flex-wrap items-center gap-3">
-                  {firebaseUser ? (
+                  {canvasUser ? (
                     <button
                       onClick={() => setShowLandingPage(false)}
-                      className="inline-flex items-center justify-center gap-2.5 bg-blue-600 text-white px-5 py-2.5 rounded-md text-sm font-medium hover:bg-blue-700 transition-colors"
+                      className="inline-flex items-center justify-center gap-2.5 rounded-md bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500/70"
                     >
                       Go to App
                     </button>
                   ) : (
                     <button
                       onClick={handleCanvasSignIn}
-                      className="inline-flex items-center justify-center gap-2.5 bg-blue-600 text-white px-5 py-2.5 rounded-md text-sm font-medium hover:bg-blue-700 transition-colors"
+                      className="inline-flex items-center justify-center gap-2.5 rounded-md bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500/70"
                     >
                       <img src="/canvas-logo.png" width="18" height="18" alt="" aria-hidden="true" style={{ filter: "brightness(0) invert(1)" }} />
                       Sign in with Canvas
@@ -3252,7 +4231,7 @@ function App() {
                   )}
                   <a
                     href="/demo"
-                    className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-md text-sm font-medium border border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-white transition-colors"
+                    className="inline-flex items-center justify-center gap-2 rounded-md border border-zinc-700 px-5 py-2.5 text-sm font-medium text-zinc-300 transition-colors hover:border-zinc-500 hover:bg-zinc-900 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500/70"
                   >
                     Try Demo
                   </a>
@@ -3260,9 +4239,9 @@ function App() {
 
                 <div className="mt-9 space-y-2.5 text-sm">
                   {[
-                    ["Modules & files", "Finds dates in uploaded schedules, not just the assignments tab"],
-                    ["Announcements & pages", "Catches deadline changes posted outside the gradebook"],
-                    ["Deduped timeline", "Merges overlapping items so nothing is missed or double-counted"],
+                    ["Canvas-provided dates", "Assignments keep a clear Canvas label when they come from the gradebook"],
+                    ["Course-material dates", "Dates found in files, pages, modules, and announcements stay reviewable"],
+                    ["One weekly timeline", "Completion, filters, and course labels stay focused on deadline recovery"],
                   ].map(([title, desc]) => (
                     <div key={title} className="flex items-start gap-3 p-3 rounded-md bg-zinc-950 border border-zinc-800/60">
                       <span className="mt-0.5 w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
@@ -3278,19 +4257,35 @@ function App() {
               <LandingDemoSquare />
             </main>
           </div>
+          <LegalFooter />
         </div>
       </>
     );
   }
 
+  const showConsentModal = Boolean(canvasUser) && !isDemoMode && !authLoading && !legalConsentAccepted;
+
   return (
     <>
-      <Toaster
-        position="top-right"
-        offset={syncToastOffset}
-        options={{ fill: "#0b1020", roundness: 14, duration: 2600 }}
-      />
+      {showConsentModal ? (
+        <ConsentModal onAccepted={() => setLegalConsentAccepted(true)} />
+      ) : null}
+      {!isMobileLayout ? (
+        <Toaster
+          position="top-right"
+          offset={syncToastOffset}
+          options={{ fill: "#0b1020", roundness: 14, duration: 2600 }}
+        />
+      ) : null}
+      {isMobileLayout && mobileNotice ? (
+        <div className="pointer-events-none fixed inset-x-0 top-0 z-[120] pt-[max(6px,env(safe-area-inset-top))]">
+          <div className="pointer-events-auto">
+            <MobileNotice notice={mobileNotice} onDismiss={dismissMobileNotice} />
+          </div>
+        </div>
+      ) : null}
       <div className={`h-screen flex flex-col bg-black app-font theme-app ${theme === "light" ? "theme-light" : "theme-dark"} ${colorMode === "vibrant" ? "mode-vibrant" : "mode-standard"}`}>
+        <PilotBanner />
         {/* Font Imports */}
         <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Patrick+Hand&family=Merriweather:wght@400;700&family=Space+Mono:wght@400;700&family=Roboto:wght@400;700&family=Lato:wght@400;700&family=Open+Sans:wght@400;700&family=Poppins:wght@400;600;700&display=swap');
@@ -3345,7 +4340,237 @@ function App() {
 
 .theme-app .bg-blue-600 { background-color: var(--accent) !important; }
 .theme-app .hover\\:bg-blue-700:hover { background-color: var(--accent-hover) !important; }
-.theme-app .focus\\:border-blue-500:focus { border-color: var(--accent) !important; }
+        .theme-app .focus\\:border-blue-500:focus { border-color: var(--accent) !important; }
+
+        /*
+          Open Design mobile experiment
+          Source: Open Design frontend-design skill + design-systems/application.
+          This layer is intentionally scoped to the phone shell so the desktop
+          product surface can keep its current dark CanvasSync UI.
+        */
+        .theme-app .od-mobile-shell {
+          --od-bg: #f6f7f9;
+          --od-surface: #ffffff;
+          --od-surface-warm: #eef4ff;
+          --od-fg: #172033;
+          --od-fg-2: #3b4658;
+          --od-muted: #6b7689;
+          --od-border: #d8dee8;
+          --od-border-soft: #edf1f6;
+          --od-accent: #2563eb;
+          --od-accent-on: #ffffff;
+          --od-success: #16a34a;
+          --od-warn: #f59e0b;
+          --od-danger: #dc2626;
+          --od-radius-sm: 8px;
+          --od-radius-md: 12px;
+          --od-radius-lg: 18px;
+          --od-shadow-raised: 0 16px 40px rgba(23, 32, 51, 0.10);
+          --od-focus-ring: 0 0 0 4px rgba(37, 99, 235, 0.22);
+          background: var(--od-bg) !important;
+          color: var(--od-fg) !important;
+          font-family: Inter, system-ui, sans-serif;
+          line-height: 1.5;
+          letter-spacing: 0;
+        }
+
+        .theme-app .od-mobile-shell.bg-black,
+        .theme-app .od-mobile-shell .bg-black,
+        .theme-app .od-mobile-shell .bg-zinc-950,
+        .theme-app .od-mobile-shell .bg-zinc-900,
+        .theme-app .od-mobile-shell .bg-zinc-800,
+        .theme-app .od-mobile-shell .bg-zinc-700,
+        .theme-app .od-mobile-shell [class~="bg-zinc-950/85"],
+        .theme-app .od-mobile-shell [class~="bg-zinc-950/75"],
+        .theme-app .od-mobile-shell [class~="bg-zinc-950/70"],
+        .theme-app .od-mobile-shell [class~="bg-zinc-950/50"] {
+          background-color: var(--od-surface) !important;
+        }
+
+        .theme-app .od-mobile-shell header,
+        .theme-app .od-mobile-shell nav {
+          box-shadow: 0 1px 0 var(--od-border-soft);
+        }
+
+        .theme-app .od-mobile-shell nav {
+          box-shadow: 0 -1px 0 var(--od-border-soft), 0 -14px 32px rgba(23, 32, 51, 0.06);
+        }
+
+        .theme-app .od-mobile-shell main {
+          background: var(--od-bg) !important;
+        }
+
+        .theme-app .od-mobile-shell section > .rounded-lg,
+        .theme-app .od-mobile-shell li.rounded-lg {
+          border-radius: var(--od-radius-md) !important;
+        }
+
+        .theme-app .od-mobile-shell .border-zinc-900,
+        .theme-app .od-mobile-shell .border-zinc-800,
+        .theme-app .od-mobile-shell .border-zinc-700,
+        .theme-app .od-mobile-shell [class~="border-zinc-600/60"] {
+          border-color: var(--od-border) !important;
+        }
+
+        .theme-app .od-mobile-shell .border-dashed {
+          border-color: var(--od-border) !important;
+          background-color: rgba(255, 255, 255, 0.72) !important;
+        }
+
+        .theme-app .od-mobile-shell.text-white,
+        .theme-app .od-mobile-shell .text-white,
+        .theme-app .od-mobile-shell .text-zinc-100,
+        .theme-app .od-mobile-shell .text-zinc-200,
+        .theme-app .od-mobile-shell .text-zinc-300 {
+          color: var(--od-fg) !important;
+        }
+
+        .theme-app .od-mobile-shell .text-zinc-400,
+        .theme-app .od-mobile-shell .text-zinc-500,
+        .theme-app .od-mobile-shell .text-zinc-600,
+        .theme-app .od-mobile-shell .text-zinc-700 {
+          color: var(--od-muted) !important;
+        }
+
+        .theme-app .od-mobile-shell .bg-blue-600,
+        .theme-app .od-mobile-shell .hover\\:bg-blue-700:hover {
+          background-color: var(--od-accent) !important;
+          border-color: var(--od-accent) !important;
+          color: var(--od-accent-on) !important;
+        }
+
+        .theme-app .od-mobile-shell .text-blue-100,
+        .theme-app .od-mobile-shell .text-blue-200,
+        .theme-app .od-mobile-shell .text-blue-300 {
+          color: var(--od-accent) !important;
+        }
+
+        .theme-app .od-mobile-shell .bg-blue-400,
+        .theme-app .od-mobile-shell .bg-blue-500,
+        .theme-app .od-mobile-shell [class~="bg-blue-400/90"] {
+          background-color: var(--od-accent) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="bg-blue-500/15"],
+        .theme-app .od-mobile-shell [class~="bg-blue-500/10"],
+        .theme-app .od-mobile-shell [class~="bg-blue-950/60"],
+        .theme-app .od-mobile-shell .bg-blue-950 {
+          background-color: rgba(37, 99, 235, 0.09) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="border-blue-500/45"],
+        .theme-app .od-mobile-shell [class~="border-blue-500/35"],
+        .theme-app .od-mobile-shell [class~="border-blue-500/30"],
+        .theme-app .od-mobile-shell .border-blue-900 {
+          border-color: rgba(37, 99, 235, 0.28) !important;
+        }
+
+        .theme-app .od-mobile-shell .text-green-200,
+        .theme-app .od-mobile-shell .text-green-300,
+        .theme-app .od-mobile-shell .text-emerald-200,
+        .theme-app .od-mobile-shell .text-emerald-300 {
+          color: #15803d !important;
+        }
+
+        .theme-app .od-mobile-shell .text-red-200,
+        .theme-app .od-mobile-shell .text-red-300 {
+          color: #b91c1c !important;
+        }
+
+        .theme-app .od-mobile-shell .text-amber-200,
+        .theme-app .od-mobile-shell .text-amber-300 {
+          color: #92400e !important;
+        }
+
+        .theme-app .od-mobile-shell .text-teal-200,
+        .theme-app .od-mobile-shell .text-teal-300 {
+          color: #0f766e !important;
+        }
+
+        .theme-app .od-mobile-shell .text-orange-300 { color: #c2410c !important; }
+        .theme-app .od-mobile-shell .text-yellow-300 { color: #a16207 !important; }
+        .theme-app .od-mobile-shell .text-lime-300 { color: #4d7c0f !important; }
+        .theme-app .od-mobile-shell .text-cyan-300 { color: #0e7490 !important; }
+        .theme-app .od-mobile-shell .text-sky-300 { color: #0369a1 !important; }
+        .theme-app .od-mobile-shell .text-indigo-300 { color: #4338ca !important; }
+        .theme-app .od-mobile-shell .text-violet-300 { color: #6d28d9 !important; }
+        .theme-app .od-mobile-shell .text-purple-300 { color: #7e22ce !important; }
+        .theme-app .od-mobile-shell .text-fuchsia-300 { color: #a21caf !important; }
+        .theme-app .od-mobile-shell .text-pink-300 { color: #be185d !important; }
+        .theme-app .od-mobile-shell .text-rose-300 { color: #be123c !important; }
+        .theme-app .od-mobile-shell .text-stone-300 { color: #57534e !important; }
+        .theme-app .od-mobile-shell .text-slate-300 { color: var(--od-fg-2) !important; }
+
+        .theme-app .od-mobile-shell [class~="bg-green-500/10"],
+        .theme-app .od-mobile-shell .bg-green-950 {
+          background-color: rgba(22, 163, 74, 0.10) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="border-green-500/35"],
+        .theme-app .od-mobile-shell [class~="border-green-500/30"],
+        .theme-app .od-mobile-shell .border-green-900 {
+          border-color: rgba(22, 163, 74, 0.28) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="bg-red-500/10"],
+        .theme-app .od-mobile-shell [class~="bg-red-950/60"],
+        .theme-app .od-mobile-shell .bg-red-950 {
+          background-color: rgba(220, 38, 38, 0.09) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="border-red-500/35"],
+        .theme-app .od-mobile-shell [class~="border-red-500/30"],
+        .theme-app .od-mobile-shell .border-red-900 {
+          border-color: rgba(220, 38, 38, 0.24) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="bg-amber-500/10"] {
+          background-color: rgba(245, 158, 11, 0.12) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="border-amber-500/40"],
+        .theme-app .od-mobile-shell [class~="border-amber-500/35"] {
+          border-color: rgba(245, 158, 11, 0.30) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="bg-teal-500/10"] {
+          background-color: rgba(20, 184, 166, 0.10) !important;
+        }
+
+        .theme-app .od-mobile-shell [class~="border-teal-500/30"] {
+          border-color: rgba(20, 184, 166, 0.26) !important;
+        }
+
+        .theme-app .od-mobile-shell .bg-slate-800 {
+          background-color: var(--od-border-soft) !important;
+        }
+
+        .theme-app .od-mobile-shell .border-slate-700 {
+          border-color: var(--od-border) !important;
+        }
+
+        .theme-app .od-mobile-shell .od-mobile-brand {
+          color: var(--od-fg) !important;
+          letter-spacing: 0;
+        }
+
+        .theme-app .od-mobile-shell .od-mobile-brand-icon {
+          background: var(--od-surface-warm);
+          border-color: rgba(37, 99, 235, 0.18);
+          box-shadow: 0 1px 0 rgba(23, 32, 51, 0.04);
+        }
+
+        .theme-app .od-mobile-shell .od-mobile-demo-badge {
+          background: rgba(245, 158, 11, 0.12);
+          border-color: rgba(245, 158, 11, 0.30);
+          color: #92400e !important;
+        }
+
+        .theme-app .od-mobile-shell button:focus-visible,
+        .theme-app .od-mobile-shell a:focus-visible {
+          outline: none !important;
+          box-shadow: var(--od-focus-ring);
+        }
 
 
         @keyframes fadeInUp {
@@ -3391,8 +4616,13 @@ function App() {
 
         {/* Profile Popup */}
         {showProfilePopup && (
-          <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
-            <div className="bg-zinc-900 rounded-lg shadow-xl w-full max-w-md p-6 relative border border-zinc-800">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <div
+              className="od-responsive-dialog relative max-h-[calc(100vh-2rem)] w-full max-w-md overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900 p-5 shadow-xl sm:p-6"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="profile-dialog-title"
+            >
               <button
                 onClick={() => setShowProfilePopup(false)}
                 className="absolute top-4 right-4 text-zinc-500 hover:text-white"
@@ -3401,15 +4631,15 @@ function App() {
                 <X size={20} />
               </button>
 
-              <h2 className="text-xl font-semibold mb-4 text-white">Profile</h2>
+              <h2 id="profile-dialog-title" className="text-xl font-semibold mb-4 text-white">Profile</h2>
 
               {/* Sections */}
-              <div className="flex gap-4">
-                <div className="w-32 shrink-0">
-                  <div className="space-y-1">
+              <div className="flex flex-col gap-4 sm:flex-row">
+                <div className="shrink-0 sm:w-32">
+                  <div className="grid grid-cols-3 gap-1 sm:block sm:space-y-1">
                     <button
                       onClick={() => setProfileTab("account")}
-                      className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${profileTab === "account"
+                      className={`w-full px-2 py-2 text-center rounded-md text-sm font-medium transition-colors sm:px-3 sm:text-left ${profileTab === "account"
                         ? "bg-blue-600 text-white"
                         : "bg-transparent hover:bg-zinc-800 text-zinc-400 hover:text-white"
                         }`}
@@ -3418,7 +4648,7 @@ function App() {
                     </button>
                     <button
                       onClick={() => setProfileTab("settings")}
-                      className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${profileTab === "settings"
+                      className={`w-full px-2 py-2 text-center rounded-md text-sm font-medium transition-colors sm:px-3 sm:text-left ${profileTab === "settings"
                         ? "bg-blue-600 text-white"
                         : "bg-transparent hover:bg-zinc-800 text-zinc-400 hover:text-white"
                         }`}
@@ -3427,7 +4657,7 @@ function App() {
                     </button>
                     <button
                       onClick={() => setProfileTab("upgrade")}
-                      className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${profileTab === "upgrade"
+                      className={`w-full px-2 py-2 text-center rounded-md text-sm font-medium transition-colors sm:px-3 sm:text-left ${profileTab === "upgrade"
                         ? "bg-blue-600 text-white"
                         : "bg-transparent hover:bg-zinc-800 text-zinc-400 hover:text-white"
                         }`}
@@ -3457,7 +4687,7 @@ function App() {
                           ))}
                         </select>
                         <p className="text-xs text-zinc-500 mt-2">
-                          Applies to the whole app (including the "notebook" sections).
+                          Used across CanvasSync.
                         </p>
                       </div>
 
@@ -3560,14 +4790,6 @@ function App() {
                           <div>
                             Base URL: <span className="text-zinc-300">{canvasBaseUrl || "--"}</span>
                           </div>
-                          {ENABLE_MANUAL_TOKEN_CONNECT ? (
-                            <div>
-                              Token:{" "}
-                              <span className="text-zinc-300">
-                                {canvasToken ? `****${canvasToken.slice(-4)}` : "--"}
-                              </span>
-                            </div>
-                          ) : null}
                           <div>
                             Current font:{" "}
                             <span className="text-zinc-300">
@@ -3577,47 +4799,38 @@ function App() {
                         </div>
                       </div>
 
-                      {/* Canvas credentials */}
+                      {/* Canvas OAuth connection */}
                       <div>
                         <label className="block text-sm font-medium text-zinc-400 mb-2">
-                          Canvas URL
+                          Canvas instance
                         </label>
                         <input
                           value={canvasBaseUrl}
-                          onChange={(e) => setCanvasBaseUrl(e.target.value)}
-                          className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
+                          readOnly
+                          className="w-full bg-zinc-900 text-zinc-400 px-3 py-2 rounded border border-zinc-800"
                           placeholder="https://gatech.instructure.com"
                         />
                       </div>
 
-                      {ENABLE_MANUAL_TOKEN_CONNECT ? (
-                        <div>
-                          <label className="block text-sm font-medium text-zinc-400 mb-2">
-                            Access Token
-                          </label>
-                          <input
-                            type="password"
-                            value={canvasToken}
-                            onChange={(e) => setCanvasToken(e.target.value)}
-                            className="w-full bg-zinc-800 text-white px-3 py-2 rounded border border-zinc-700 focus:border-blue-500 focus:outline-none"
-                            placeholder="Paste your Canvas token"
-                          />
-                        </div>
-                      ) : null}
-
                       <div className="flex gap-2 justify-end">
                         <button
-                          className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white"
+                          disabled={canvasStatus === "Connecting..." || canvasStatus === "Fetching courses..."}
+                          className="inline-flex items-center gap-2 rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                           onClick={() => connectCanvas()}
                         >
-                          Connect
+                          {canvasStatus === "Connecting..." || canvasStatus === "Fetching courses..." ? (
+                            <Loader2 size={15} className="animate-spin" />
+                          ) : null}
+                          Reconnect with Canvas OAuth
                         </button>
 
                         <button
-                          className="px-4 py-2 rounded bg-zinc-800 hover:bg-zinc-700 text-white"
+                          disabled={isDisconnectingCanvas}
+                          className="inline-flex items-center gap-2 rounded bg-zinc-800 px-4 py-2 text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
                           onClick={() => disconnectCanvas()}
                         >
-                          Disconnect
+                          {isDisconnectingCanvas ? <Loader2 size={15} className="animate-spin" /> : null}
+                          {isDisconnectingCanvas ? "Disconnecting..." : "Disconnect"}
                         </button>
 
                         <button
@@ -3628,11 +4841,46 @@ function App() {
                         </button>
                       </div>
 
+                      {!isDemoMode && (
+                        <div className="mt-4 pt-4 border-t border-zinc-800">
+                          <p className="text-xs font-medium text-zinc-500 mb-2 uppercase tracking-wide">
+                            Your data
+                          </p>
+                          <div className="flex gap-2 flex-wrap">
+                            <button
+                              disabled={isExportingData}
+                              className="inline-flex items-center gap-2 rounded bg-zinc-800 px-3 py-2 text-sm text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60"
+                              onClick={() => exportMyData()}
+                            >
+                              {isExportingData ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                              {isExportingData ? "Preparing export..." : "Export my data"}
+                            </button>
+                            <button
+                              className="inline-flex items-center gap-2 rounded border border-red-900 bg-red-950 px-3 py-2 text-sm text-red-200 hover:bg-red-900"
+                              onClick={() => deleteAllMyData()}
+                            >
+                              <Trash2 size={15} />
+                              Delete all my data
+                            </button>
+                          </div>
+                          <p className="mt-2 text-xs text-zinc-500">
+                            Export downloads your active CanvasSync account and course records as JSON, excluding secrets and operational logs. Delete removes active app data and stored Canvas credentials.
+                          </p>
+                        </div>
+                      )}
+
                       {canvasStatus && (
                         <div
-                          className={`mt-2 p-3 rounded text-sm ${canvasStatus.includes("Connected")
+                          role={/failed|invalid|missing|couldn/i.test(canvasStatus) ? "alert" : "status"}
+                          className={`mt-2 rounded border p-3 text-sm ${canvasStatus.includes("Connected")
                             ? "bg-green-950 text-green-300 border border-green-900"
-                            : "bg-zinc-800 text-zinc-300"
+                            : /warning/i.test(canvasStatus)
+                              ? "border-amber-500/35 bg-amber-500/10 text-amber-300"
+                              : /failed|invalid|missing|couldn/i.test(canvasStatus)
+                                ? "border-red-900 bg-red-950 text-red-300"
+                                : /connecting|fetching/i.test(canvasStatus)
+                                  ? "border-blue-900 bg-blue-950 text-blue-300"
+                                  : "border-zinc-700 bg-zinc-800 text-zinc-300"
                             }`}
                         >
                           {canvasStatus}
@@ -3649,11 +4897,59 @@ function App() {
 
 
 
+        {showDeleteDataConfirm && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4">
+            <div
+              className="od-responsive-dialog od-mobile-dialog-panel w-full max-w-sm rounded-xl border border-red-900 bg-zinc-900 p-5 shadow-2xl"
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="delete-data-title"
+              aria-describedby="delete-data-description"
+            >
+              <div className="flex items-start gap-3">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-red-950 text-red-300">
+                  <AlertTriangle size={20} />
+                </span>
+                <div>
+                  <h2 id="delete-data-title" className="text-lg font-semibold text-white">
+                    Delete all CanvasSync data?
+                  </h2>
+                  <p id="delete-data-description" className="mt-1 text-sm leading-relaxed text-zinc-400">
+                    This permanently deletes your stored profile, courses, assignments, announcements, extracted
+                    course text, syllabus rules, and preferences. Stored Canvas credentials are removed and remote
+                    revocation is attempted. This cannot be undone.
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={isDeletingData}
+                  onClick={() => setShowDeleteDataConfirm(false)}
+                  className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm font-semibold text-zinc-300 disabled:opacity-50"
+                >
+                  Keep my data
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeletingData}
+                  onClick={() => void confirmDeleteAllMyData()}
+                  className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isDeletingData ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                  {isDeletingData ? "Deleting..." : "Delete everything"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Demo intro — user must acknowledge before syncing */}
         {isDemoMode && showDemoIntro && (
-          <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[70] p-4">
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
             <div
-              className="bg-zinc-900 rounded-xl shadow-2xl w-full max-w-md border border-zinc-700 p-6"
+              className="od-responsive-dialog od-mobile-dialog-panel w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-6 shadow-2xl"
               role="dialog"
               aria-labelledby="demo-intro-title"
               aria-modal="true"
@@ -3666,21 +4962,17 @@ function App() {
               <ul className="mt-4 space-y-3 text-sm text-zinc-300 leading-relaxed">
                 <li>
                   <span className="font-medium text-white">This is a demo.</span>{" "}
-                  No Canvas login is required — you are exploring a sandbox environment.
+                  No Canvas login is required. The session uses temporary sample data.
                 </li>
                 <li>
                   <span className="font-medium text-white">Mock MATH 2552 data.</span>{" "}
-                  The course uses a real syllabus PDF and schedule, plus sample WebWork and quiz assignments (not your real Canvas account).
+                  The course includes a syllabus, schedule, and sample assignments rather than your Canvas account.
                 </li>
                 <li>
-                  <span className="font-medium text-white">How it works.</span>{" "}
-                  When you sync, we extract text from the syllabus files, load mock assignments, then use AI to match and fill in due dates — the same pipeline as production.
+                  <span className="font-medium text-white">Real sync pipeline.</span>{" "}
+                  Syncing runs the same course-text extraction and date-matching process used by the production app.
                 </li>
               </ul>
-
-              <p className="mt-4 text-xs text-zinc-500">
-                After you continue, click the highlighted <span className="text-amber-300">Sync</span> button in the toolbar to start.
-              </p>
 
               <div className="mt-6 flex items-center justify-between gap-3">
                 <button
@@ -3695,7 +4987,7 @@ function App() {
                   onClick={handleDemoIntroOk}
                   className="px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold"
                 >
-                  OK, got it
+                  Continue
                 </button>
               </div>
             </div>
@@ -3704,8 +4996,13 @@ function App() {
 
         {/* Upgrade Modal (large) */}
         {showUpgradeModal && (
-          <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-[60]">
-            <div className="bg-zinc-900 rounded-lg shadow-2xl w-full max-w-2xl p-6 relative border border-zinc-800">
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+            <div
+              className="od-responsive-dialog od-mobile-dialog-panel relative max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-900 p-6 shadow-2xl"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="upgrade-dialog-title"
+            >
               <button
                 onClick={() => setShowUpgradeModal(false)}
                 className="absolute top-4 right-4 text-zinc-500 hover:text-white"
@@ -3714,7 +5011,7 @@ function App() {
                 <X size={20} />
               </button>
 
-              <h3 className="text-lg font-semibold text-white">Upgrade account</h3>
+              <h3 id="upgrade-dialog-title" className="text-lg font-semibold text-white">Upgrade account</h3>
               <p className="text-sm text-zinc-500 mt-1">
                 Mock subscription selection (no real payment flow).
               </p>
@@ -3757,7 +5054,16 @@ function App() {
                 <button
                   className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white"
                   onClick={() => {
-                    if (selectedPlanKey) setCurrentPlan(selectedPlanKey);
+                    if (selectedPlanKey) {
+                      setCurrentPlan(selectedPlanKey);
+                      if (isMobileLayout) {
+                        showMobileNotice({
+                          tone: "success",
+                          title: "Plan selection updated",
+                          message: `${PLAN_OPTIONS[selectedPlanKey]?.name || "Selected plan"} is now shown as your current mock plan.`,
+                        });
+                      }
+                    }
                     setShowUpgradeModal(false);
                   }}
                 >
@@ -3768,8 +5074,136 @@ function App() {
           </div>
         )}
 
+        {/* Mobile app shell */}
+        <div className="od-mobile-shell flex min-h-0 flex-1 flex-col bg-black text-white md:hidden">
+          <header className="shrink-0 border-b border-zinc-900 bg-zinc-950 px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              {isDemoMode ? (
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="od-mobile-brand flex min-w-0 items-center gap-2">
+                    <span className="od-mobile-brand-icon grid h-8 w-8 shrink-0 place-items-center rounded-lg border">
+                      <img src="/canvassync-icon-48.png" width="20" height="20" alt="" aria-hidden="true" />
+                    </span>
+                    <span className="truncate text-base font-semibold">CanvasSync</span>
+                  </span>
+                  <span className="od-mobile-demo-badge rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider">
+                    Demo
+                  </span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLandingPage(true);
+                    setShowSyncProgressPopover(false);
+                    setShowProfilePopup(false);
+                  }}
+                  className="od-mobile-brand flex min-w-0 items-center gap-2"
+                  aria-label="Open CanvasSync landing page"
+                >
+                  <span className="od-mobile-brand-icon grid h-8 w-8 shrink-0 place-items-center rounded-lg border">
+                    <img src="/canvassync-icon-48.png" width="20" height="20" alt="" aria-hidden="true" />
+                  </span>
+                  <span className="truncate text-base font-semibold">CanvasSync</span>
+                </button>
+              )}
+
+              {isDemoMode ? (
+                <button
+                  type="button"
+                  onClick={handleExitDemo}
+                  className="shrink-0 rounded-lg border border-zinc-700 px-3 py-2 text-sm font-semibold text-zinc-200"
+                >
+                  Exit
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSyncProgressPopover(false);
+                    setShowProfilePopup(true);
+                  }}
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-zinc-800 bg-black text-zinc-300"
+                  aria-label="Account options"
+                >
+                  <User size={18} />
+                </button>
+              )}
+            </div>
+
+            <div className="mt-3 flex items-end justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase text-zinc-500">{mobileActiveEyebrow}</p>
+                <h1 className="mt-0.5 truncate text-lg font-semibold text-zinc-100">{mobileActiveTitle}</h1>
+              </div>
+              <div className="shrink-0">
+                {renderSyncToolbarControls()}
+              </div>
+            </div>
+          </header>
+
+          {showMobileSyncProgress ? (
+            <section className="shrink-0 border-b border-zinc-900 bg-black px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className={`truncate text-xs font-semibold ${mobileSyncComplete ? "text-green-300" : "text-zinc-300"}`}>
+                    {mobileSyncPhaseLabel}
+                  </p>
+                  <p className="mt-0.5 truncate text-[11px] text-zinc-600">
+                    {mobileSyncDetailLabel}
+                  </p>
+                </div>
+                <span className={`shrink-0 text-sm font-semibold ${mobileSyncComplete ? "text-green-300" : "text-blue-200"}`}>
+                  {mobileSyncProgressPercent}%
+                </span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full border border-zinc-800 bg-zinc-950">
+                <div
+                  className={`h-full overflow-hidden transition-all duration-700 ease-out ${mobileSyncComplete ? "bg-green-400" : "od-mobile-progress-active bg-blue-400/90"}`}
+                  style={{ width: `${mobileSyncProgressPercent}%` }}
+                />
+              </div>
+            </section>
+          ) : null}
+
+          <main className="min-h-0 flex-1 overflow-y-auto px-4 py-4 custom-scrollbar">
+            {activeTab === "home" && renderMobileWeeklyView()}
+            {activeTab === "calendar" && renderMobileCalendarView()}
+            {activeTab === "classSettings" && renderMobileClassSettingsView()}
+            {activeTab === "course" && renderMobileCourseView()}
+            <LegalFooter className="px-0 py-5 text-[10px]" />
+          </main>
+
+          <nav className="shrink-0 border-t border-zinc-800 bg-zinc-950 px-2 pb-2 pt-2">
+            <div className="grid grid-cols-3 gap-1">
+              {[
+                { id: "home", label: "Week", Icon: List },
+                { id: "calendar", label: "Calendar", Icon: Calendar },
+                { id: "classSettings", label: "Classes", Icon: Settings2 },
+              ].map(({ id, label, Icon }) => {
+                const isActive = activeTab === id || (id === "classSettings" && activeTab === "course");
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setActiveTab(id)}
+                    aria-current={isActive ? "page" : undefined}
+                    className={`flex min-h-[52px] flex-col items-center justify-center gap-1 rounded-lg text-xs font-semibold transition-colors ${isActive
+                      ? "bg-blue-600 text-white"
+                      : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
+                      }`}
+                  >
+                    <Icon size={18} />
+                    <span>{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+        </div>
+
         {/* Top Bar with Profile */}
-        <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center px-6 py-2 bg-zinc-950 border-b border-zinc-800 gap-3">
+        <div className="hidden grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center px-6 py-2 bg-zinc-950 border-b border-zinc-800 gap-3 md:grid">
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -3810,11 +5244,11 @@ function App() {
 
               <button
                 onClick={() => setShowSyncProgressPopover((prev) => !prev)}
-                className="relative z-50 w-[240px] max-w-[calc(100vw-8rem)] rounded-xl border border-zinc-700/70 bg-[#0b1020]/90 px-3.5 py-2.5 text-left shadow-[0_8px_24px_rgba(2,8,20,0.35)] hover:bg-[#121c31]/90 transition-colors"
+                className="relative z-50 w-[240px] max-w-[calc(100vw-8rem)] rounded-xl border border-zinc-700/70 bg-[#0b1020]/90 px-3.5 py-2.5 text-left shadow-[0_8px_24px_rgba(2,8,20,0.35)] transition-colors hover:bg-[#121c31]/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500/70"
                 title="Sync progress"
               >
                 <div className="flex items-center justify-between gap-2 leading-none">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-200">Sync</span>
+                  <span className="text-[11px] font-semibold uppercase text-zinc-200">Sync</span>
                   <span className="text-sm font-semibold text-blue-200">{syncProgressDisplayPercent}%</span>
                 </div>
 
@@ -3827,9 +5261,9 @@ function App() {
               </button>
 
               {showSyncProgressPopover && (
-                <div className="absolute right-0 z-50 mt-2 w-64 rounded-xl border border-zinc-700/70 bg-[#0b1020]/95 p-3.5 shadow-2xl backdrop-blur">
+                <div className="absolute right-0 z-50 mt-2 w-80 rounded-xl border border-zinc-700/70 bg-[#0b1020]/95 p-3.5 shadow-2xl backdrop-blur">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm font-semibold tracking-wide text-zinc-100">Sync Progress</span>
+                    <span className="text-sm font-semibold text-zinc-100">Sync Progress</span>
                     <span className="text-base font-semibold text-blue-200">{syncProgressDisplayPercent}%</span>
                   </div>
 
@@ -3840,10 +5274,42 @@ function App() {
                     />
                   </div>
 
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950/70 px-2.5 py-2">
+                      <p className="text-zinc-500">Current</p>
+                      <p className="mt-1 truncate font-medium text-zinc-100">{activeSyncCourseLabel}</p>
+                    </div>
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950/70 px-2.5 py-2">
+                      <p className="text-zinc-500">Phase</p>
+                      <p className="mt-1 truncate font-medium text-blue-200">{activeSyncPhase}</p>
+                    </div>
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950/70 px-2.5 py-2">
+                      <p className="text-zinc-500">Run</p>
+                      <p className="mt-1 font-medium text-zinc-100">{syncProgressLabel}</p>
+                    </div>
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950/70 px-2.5 py-2">
+                      <p className="text-zinc-500">Elapsed</p>
+                      <p className="mt-1 font-medium text-zinc-100">{syncElapsedLabel || "Idle"}</p>
+                    </div>
+                  </div>
+
                   <div className="mt-2.5 space-y-1 text-xs">
-                    <p className="text-zinc-200">{syncProgressLabel}</p>
+                    <p className="text-zinc-400">Queue: {syncWaitingCount} waiting</p>
                     <p className="text-zinc-400">Last sync: {lastSyncLabel}</p>
                   </div>
+
+                  {visibleSyncWarnings.length > 0 ? (
+                    <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-100">
+                      <p className="font-medium">Warnings</p>
+                      <div className="mt-1 space-y-1 text-amber-100/85">
+                        {visibleSyncWarnings.slice(0, 2).map((warning) => (
+                          <p key={`${warning.courseLabel}-${warning.message}`}>
+                            {warning.courseLabel}: {warning.message}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -3861,7 +5327,7 @@ function App() {
           </div>
         </div>
 
-        <div className="flex flex-1 overflow-hidden">
+        <div className="hidden flex-1 overflow-hidden md:flex">
           {/* SIDEBAR */}
           {!sidebarCollapsed && (
             <aside className="w-[230px] border-r border-zinc-900 bg-black flex flex-col min-h-0">
@@ -4041,108 +5507,122 @@ function App() {
                   </div>
                 </div>
 
-                <section className="flex-1 p-6 overflow-hidden flex gap-6">
-                  <div className="flex-1 h-full flex flex-col">
-                    {/* Notebook Container */}
-                    <div className="flex-1 bg-[#09090b] rounded-md shadow-2xl overflow-hidden border border-zinc-800 relative">
-                      {/* Visual Binding Strip */}
-                      <div className="absolute left-0 top-0 bottom-0 w-12 border-r border-zinc-800 bg-zinc-950 z-10 hidden sm:block"></div>
+                <section className="flex-1 overflow-hidden bg-black">
+                  <div className="mx-auto flex h-full max-w-6xl flex-col px-6 py-5">
+                    <div className="mb-4 flex flex-col gap-3 border-b border-zinc-900 pb-4 md:flex-row md:items-end md:justify-between">
+                      <div>
+                        <h1 className="text-xl font-semibold text-zinc-100">This week</h1>
+                        <p className="mt-1 text-sm text-zinc-500">
+                          {weekDates[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} to {weekDates[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        </p>
+                      </div>
 
-                      <div className="h-full overflow-y-auto pl-2 sm:pl-12 custom-scrollbar">
-                        {weekItems.length === 0 ? (
-                          <div className="flex flex-col items-center justify-center h-full text-zinc-500 font-notebook text-xl"><p>Nothing due this week...</p></div>
-                        ) : (
-                          <div className="py-6 px-4 sm:px-8 space-y-8">
-                            {Object.entries(itemsByDay).map(([dayName, dayData]) => {
-                              if (dayData.items.length === 0) return null;
-                              const isToday = isSameDay(dayData.date, new Date());
-                              return (
-                                <div key={dayName} className="relative">
-                                  <h3 className={`text-xl font-notebook mb-2 flex items-baseline gap-3 ${isToday ? 'text-blue-400' : 'text-zinc-500'}`}>
-                                    <span className="font-bold tracking-wide">{dayName}</span>
-                                    <span className="text-sm font-sans opacity-60">{dayData.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
-                                  </h3>
-
-                                  {/* Start of List */}
-                                  <ul className="space-y-0">
-                                    {dayData.items.map((item) => {
-                                      const isCompleted = isItemCompleted(item);
-
-                                      return (
-                                        <li key={item.id} className={`group relative flex items-start gap-3 py-3 border-b border-zinc-800/60 hover:bg-zinc-900/30 transition-all duration-300 ${isCompleted ? 'opacity-40' : ''}`}>
-                                          {/* Strikethrough line across entire row */}
-                                          {isCompleted && (
-                                            <div className="absolute left-0 right-0 top-1/2 h-[2px] bg-zinc-500/60 pointer-events-none z-10" />
-                                          )}
-                                          {/* Checkbox */}
-                                          <button
-                                            onClick={() => toggleComplete(item)}
-                                            className="mt-1 text-zinc-600 hover:text-green-500 transition-colors relative z-20"
-                                          >
-                                            {isCompleted ? <CheckCircle2 size={20} className="text-green-500" /> : <Circle size={20} />}
-                                          </button>
-
-                                          <div className="flex-1 flex items-center justify-between gap-4 font-notebook text-lg tracking-wide">
-                                            <div className={`flex items-baseline gap-2 ${isCompleted ? 'text-zinc-600' : 'text-zinc-200'}`}>
-                                              {/* Course Code Tag with color */}
-                                              <span
-                                                className={`px-1.5 py-0.5 rounded text-xs font-semibold uppercase tracking-wide ${getCourseColorClasses(getEffectiveCourseColor(item.courseId, item.courseCode, item.courseName)).tag}`}
-                                              >
-                                                {item.courseCode ? item.courseCode.toUpperCase() : "UNK"}
-                                              </span>
-                                              {/* Item Name */}
-                                              <span className="inline-flex min-w-0 items-center gap-1.5">
-                                                <span className="truncate">{item.name}</span>
-                                                <AIDiscoveredIndicator item={item} size={9} />
-                                              </span>
-                                            </div>
-
-                                            <div className="flex items-center gap-3 shrink-0">
-                                              {/* Due Time */}
-                                              <span className="text-sm text-zinc-500 font-sans">
-                                                {(() => {
-                                                  const dt = parseDueToDate(item.due);
-                                                  return dt
-                                                    ? dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-                                                    : "--";
-                                                })()}
-                                              </span>
-                                              {getCategoryBadge(item.category, "opacity-90 scale-90")}
-                                            </div>
-                                          </div>
-                                        </li>
-                                      );
-                                    })}
-                                  </ul>
-                                  {/* End of List - This was missing! */}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
+                      <div className="w-full max-w-sm">
+                        <div className="mb-1.5 flex items-center justify-between text-xs">
+                          <span className="text-zinc-400">{completedThisWeek} of {weekItems.length} complete</span>
+                          <span className={progressPercent === 100 ? "font-semibold text-green-300" : "font-semibold text-blue-300"}>{Math.round(progressPercent)}%</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full border border-zinc-800 bg-zinc-950">
+                          <div
+                            className={`h-full transition-all duration-300 ${progressPercent === 100 ? "bg-green-500" : "bg-blue-500"}`}
+                            style={{ width: `${progressPercent}%` }}
+                          />
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  {/* Re-implemented Progress Bar */}
-                  <div
-                    ref={progressBarRef}
-                    className="w-16 sm:w-24 bg-zinc-950 rounded-lg shadow-lg border border-zinc-800 p-2 sm:p-4 shrink-0 flex flex-col items-center relative"
-                  >
-                    <p className="text-[10px] sm:text-xs font-semibold text-zinc-500 uppercase tracking-widest mb-2 vertical-text sm:horizontal-text text-center">Progress</p>
-                    <div className="flex-1 w-2 sm:w-4 bg-zinc-900 rounded-full overflow-hidden p-0.5 flex flex-col-reverse gap-0.5">
-                      {Array.from({ length: 20 }).map((_, idx) => {
-                        const filledSegments = Math.round(progressPercent / 5);
-                        const filled = idx < filledSegments;
-                        return (
-                          <div
-                            key={idx}
-                            className={`w-full flex-1 rounded-sm transition-colors duration-300 ${filled ? (progressPercent === 100 ? 'bg-green-500' : 'bg-blue-600') : 'bg-transparent'}`}
-                          />
-                        );
-                      })}
+                    <div className="min-h-0 flex-1 overflow-y-auto pr-1 custom-scrollbar">
+                      {weekItems.length === 0 ? (
+                        <div className="grid h-full place-items-center">
+                          <div className="max-w-md rounded-lg border border-dashed border-zinc-800 bg-zinc-950/60 px-6 py-8 text-center">
+                            <p className="text-base font-medium text-zinc-200">No dated assignments this week.</p>
+                            <p className="mt-2 text-sm text-zinc-500">
+                              {selectedSyncCourseCount > 0
+                                ? "Synced courses with due dates will appear here after the next refresh."
+                                : "Select classes in Class Settings, then run Sync to build your timeline."}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-5 pb-6">
+                          {Object.entries(itemsByDay).map(([dayName, dayData]) => {
+                            if (dayData.items.length === 0) return null;
+                            const dayCue = getDayLabel(dayData.date);
+                            const isToday = isSameDay(dayData.date, new Date());
+
+                            return (
+                              <section key={dayName} aria-label={dayName}>
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                  <div className="flex items-baseline gap-2">
+                                    <h2 className={`text-sm font-semibold ${isToday ? "text-blue-300" : "text-zinc-300"}`}>{dayName}</h2>
+                                    <span className="text-xs text-zinc-600">
+                                      {dayData.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                    </span>
+                                    {dayCue ? (
+                                      <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${dayCue === "Past due" ? "border-red-500/35 bg-red-500/10 text-red-200" : dayCue === "Today" ? "border-blue-500/35 bg-blue-500/10 text-blue-200" : "border-amber-500/35 bg-amber-500/10 text-amber-200"}`}>
+                                        {dayCue}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <span className="text-xs text-zinc-600">{dayData.items.length} due</span>
+                                </div>
+
+                                <ul className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/70">
+                                  {dayData.items.map((item) => {
+                                    const isCompleted = isItemCompleted(item);
+                                    const deadlineMeta = getDeadlineMeta(item, isCompleted);
+                                    const titleClass = isCompleted
+                                      ? "text-zinc-500 line-through decoration-zinc-600"
+                                      : deadlineMeta.label === "Overdue"
+                                        ? "text-zinc-100"
+                                        : "text-zinc-200";
+
+                                    return (
+                                      <li key={item.id} className={`group grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-zinc-800/70 px-3.5 py-2.5 last:border-b-0 transition-colors hover:bg-zinc-900/70 ${isCompleted ? "bg-zinc-950/30" : ""}`}>
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleComplete(item)}
+                                          aria-label={isCompleted ? `Mark ${item.name} incomplete` : `Mark ${item.name} complete`}
+                                          className={`grid h-6 w-6 shrink-0 place-items-center rounded-full transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500/70 ${isCompleted ? "text-green-400" : "text-zinc-500 hover:text-zinc-100"}`}
+                                        >
+                                          {isCompleted ? <CheckCircle2 size={19} /> : <Circle size={19} />}
+                                        </button>
+
+                                        <div className="min-w-0">
+                                          <div className="flex min-w-0 items-center gap-2">
+                                            <span className={`truncate text-sm font-medium ${titleClass}`}>{item.name}</span>
+                                          </div>
+                                          <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5">
+                                            <span
+                                              className={`rounded border px-1.5 py-0.5 text-[11px] font-semibold uppercase ${getCourseColorClasses(getEffectiveCourseColor(item.courseId, item.courseCode, item.courseName)).tag}`}
+                                            >
+                                              {item.courseCode ? item.courseCode.toUpperCase() : "UNK"}
+                                            </span>
+                                            {getCategoryBadge(item.category, "text-[11px] px-1.5")}
+                                            <SourceStatusPills item={item} size="xs" limit={3} />
+                                          </div>
+                                        </div>
+
+                                        <div className="flex min-w-[86px] shrink-0 flex-col items-end gap-1 text-right">
+                                          <span className={`text-sm font-semibold tabular-nums ${deadlineMeta.tone}`}>
+                                            {formatDueTimeInCourseTZ(item.due)}
+                                          </span>
+                                          {deadlineMeta.label ? (
+                                            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${deadlineMeta.pill}`}>
+                                              {deadlineMeta.label}
+                                            </span>
+                                          ) : null}
+                                        </div>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </section>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
-                    <div className="mt-3 text-center"><p className={`text-lg sm:text-xl font-bold ${progressPercent === 100 ? 'text-green-500' : 'text-blue-500'}`}>{Math.round(progressPercent)}%</p></div>
                   </div>
                 </section>
               </div>
@@ -4316,7 +5796,6 @@ function App() {
                                       >
                                         <span className="font-bold opacity-75">{item.courseCode}</span>
                                         <span className="truncate">{item.name}</span>
-                                        <AIDiscoveredIndicator item={item} size={8} showTooltip={false} />
                                       </div>
                                     ))
                                   ) : null}
@@ -4367,17 +5846,16 @@ function App() {
                                       getItemsForDate(zoomedDate).map((item, itemIdx) => (
                                         <div
                                           key={itemIdx}
-                                          className={`px-2 py-1.5 rounded text-xs leading-tight border border-transparent border-l-4 hover:border-zinc-600 bg-zinc-800 text-zinc-200 flex items-center gap-1.5 ${getCourseColorClasses(getEffectiveCourseColor(item.courseId, item.courseCode, item.courseName)).accent}`}
+                                          className={`rounded border border-transparent border-l-4 bg-zinc-800 px-2 py-1.5 text-xs leading-tight text-zinc-200 hover:border-zinc-600 ${getCourseColorClasses(getEffectiveCourseColor(item.courseId, item.courseCode, item.courseName)).accent}`}
                                         >
-                                          <span className="font-bold opacity-75 shrink-0">{item.courseCode}</span>
-                                          <span className="truncate flex-1">{item.name}</span>
-                                          <AIDiscoveredIndicator item={item} size={9} className="shrink-0" />
-                                          <span className="text-[10px] text-zinc-500 shrink-0">
-                                            {(() => {
-                                              const dt = parseDueToDate(item.due);
-                                              return dt ? dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) : "";
-                                            })()}
-                                          </span>
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="shrink-0 font-bold opacity-75">{item.courseCode}</span>
+                                            <span className="min-w-0 flex-1 truncate">{item.name}</span>
+                                            <span className="shrink-0 text-[10px] text-zinc-500">
+                                              {formatDueTimeInCourseTZ(item.due)}
+                                            </span>
+                                          </div>
+                                          <SourceStatusPills item={item} size="xs" limit={2} className="mt-1" />
                                         </div>
                                       ))
                                     )}
@@ -4575,7 +6053,7 @@ function App() {
                             <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Item</th>
                             <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Category</th>
                             <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Due Date</th>
-                            <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Status</th>
+                            <th className="text-left py-2 px-2 text-zinc-400 font-semibold">Source</th>
                           </tr>
                         </thead>
 
@@ -4586,8 +6064,6 @@ function App() {
                                 <td className="py-2 px-2">
                                   <div className="flex items-center gap-2">
                                     <span className="text-white">{a.name}</span>
-                                    <AIDiscoveredIndicator item={a} size={10} />
-                                    {getStatusBadge(a.status)}
                                   </div>
                                 </td>
 
@@ -4608,8 +6084,8 @@ function App() {
                                   )}
                                 </td>
 
-                                <td className="py-2 px-2 text-xs text-zinc-500">
-                                  {a.status || "OK"}
+                                <td className="py-2 px-2">
+                                  <SourceStatusPills item={a} size="xs" limit={3} />
                                 </td>
                               </tr>
                             );
@@ -4625,7 +6101,7 @@ function App() {
           </main>
         </div>
 
-
+        <LegalFooter className="hidden shrink-0 md:block" />
       </div>
     </>
   );
